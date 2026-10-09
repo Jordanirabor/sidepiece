@@ -1,0 +1,24 @@
+# Optional object storage overlay (not needed until assets are served from storage):
+#   docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d
+# Give only port 9000 (S3 API) a public domain if assets must be fetched directly; keep the 9001 console private.
+services:
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (16+ chars)}
+    volumes:
+      - minio_data:/data
+    expose:
+      - "9000"
+      - "9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  minio_data:

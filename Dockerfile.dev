@@ -1,0 +1,4 @@
+FROM rust:1.99-bookworm
+WORKDIR /app
+RUN cargo install cargo-watch
+CMD ["cargo", "watch", "-x", "check"]

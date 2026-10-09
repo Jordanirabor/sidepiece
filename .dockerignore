@@ -1,0 +1,10 @@
+target
+.git
+.env
+web/node_modules
+web/dist
+web/node_modules
+.DS_Store
+docs
+.agents
+scripts
