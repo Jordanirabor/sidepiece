@@ -11,4 +11,8 @@
 - Server-side economy values change in `apps/api/src/life.rs` (`ACTIONS`, starting money). Display formatting is `₦` with thousands separators.
 - Don't use real venue trademarks.
 
+**Implemented (M2).**
+- Names shown to players: `city` → *Lekki Phase 1*, `neon_lounge` → *Ikoyi Lounge*, `rooftop_party` → *Victoria Island Rooftop*. Internal kinds are unchanged on purpose: they're in room ids, Redis keys, NPC placement and saved data.
+- Values: start ₦50,000 (`life::STARTING_MONEY`, inserted explicitly by the API), drink ₦3,500, food ₦5,000, shift +₦18,000. Migration `0006_naira_economy.sql` rescales old balances ×250. **Provisional:** tune with the client once spending (outfits, dates, gifts, venue entry) exists.
+
 **Revisit when.** The client wants multiple cities.

@@ -12,18 +12,22 @@ lighting, a camera blocked by a door, and overlapping panels, and **only screens
 - Dev stack running: `docker compose -f docker-compose.dev.yml up` (web :3001, api :4000 with `ALLOW_DEV_LOGIN=true`).
 - A Chromium binary. Prefer Playwright's headless shell when it exists (a desktop Chrome that's already running can block launch):
   `ls ~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell`
-- `puppeteer-core`: install it in a scratch dir, e.g. `mkdir -p /tmp/sp && cd /tmp/sp && npm i puppeteer-core@23`.
+- `puppeteer-core` is a devDependency of `web/` (`cd web && pnpm install`). Don't install it anywhere else.
 
 ## Run the walkthrough
 ```bash
-cd /tmp/sp && cp <repo>/scripts/ui-check.mjs . && \
-CHROME_PATH=<chromium> SHOTS_DIR=/tmp/sp/shots node ui-check.mjs
+cd web && mkdir -p /tmp/sp/shots && \
+CHROME_PATH=<chromium> SHOTS_DIR=/tmp/sp/shots pnpm ui-check
+# ~2.5 min with the Playwright headless shell (~7 min with desktop Chrome). Run it in the background and poll.
 ```
 It registers via dev login, walks the 4 creator panels, enters the city, steers to the Neon Lounge door using
 the `window.__sp` debug hook (`pos()`, `portals`, `venue`), presses E, opens NPC chat, sends a message, returns
 to the city and enters the Rooftop. It prints console errors at the end. **Expect `errors: none`.**
 
-Extend the script when you add screens. For mobile work, add `page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })`.
+The script runs the whole flow twice, at phone (390×844, touch) and desktop (1440×900). It prints each pass's
+horizontal overflow, which **must be 0**, and it fails if the page lays out wider than the viewport (that
+happened once: `web/index.html` lost its viewport meta and every "phone" shot was a shrunken 980px layout. If
+phone text looks tiny in a screenshot, suspect this first). Extend `web/scripts/ui-check.mjs` when you add screens.
 
 ## Compare with references (actually look)
 1. Read the screenshots with the read tool.

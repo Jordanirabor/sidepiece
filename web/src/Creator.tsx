@@ -2,8 +2,18 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArcRotateCamera, Color3, Engine, HemisphericLight, PointLight, Scene, Vector3 } from '@babylonjs/core';
 import { makeHumanoid } from './venue';
 import { ACCESSORIES, BOTTOMS, HAIR_COLORS, Item, Look, matchCode, PARTNER_TRAITS, randomLook, STYLES, TOPS, findItem } from './look';
+import { INTENTS, INTERESTS, INVITATION_TYPES, labelOf, MAX_BIO_CHARS, MAX_INTERESTS, Preferences, RELATIONSHIP_STYLES, SHOW_ME } from './prefs';
 
-export type Identity = { alias: string; gender: string; likes: string[]; look: Look; match_code: string };
+export type Identity = { alias: string; gender: string; likes: string[]; look: Look; match_code: string; bio: string; intent: string; preferences: Preferences };
+
+const STEPS = 5;
+
+function Toggle({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return <label className="switch-row">
+    <span><b>{label}</b>{hint && <em>{hint}</em>}</span>
+    <input type="checkbox" role="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+  </label>;
+}
 
 const GENDERS = [
   { id: 'male', label: 'Male', icon: '♂' },
@@ -11,8 +21,11 @@ const GENDERS = [
   { id: 'non_binary', label: 'Non-Binary', icon: '⚧' },
 ];
 
-/** Small turntable preview of the current look. Rebuilt on change (cheap for primitive avatars). */
-function Preview({ look, framing }: { look: Look; framing: 'face' | 'full' }) {
+/**
+ * 3D portrait of an avatar look (creator, profile cards, match moment). Rebuilt on change, which is cheap
+ * for primitive avatars. `interactive=false` leaves pointer input to the page (e.g. swipeable cards).
+ */
+export function Preview({ look, framing, interactive = true }: { look: Look; framing: 'face' | 'full'; interactive?: boolean }) {
   const ref = useRef<HTMLCanvasElement | null>(null);
   const lookKey = JSON.stringify(look);
   useEffect(() => {
@@ -23,7 +36,7 @@ function Preview({ look, framing }: { look: Look; framing: 'face' | 'full' }) {
     const target = framing === 'face' ? new Vector3(0, 1.78, 0) : new Vector3(0, 1.0, 0);
     const camera = new ArcRotateCamera('cam', Math.PI / 2, Math.PI / 2.1, framing === 'face' ? 1.1 : 3.6, target, scene);
     camera.minZ = 0.05; // default near plane (1 unit) clips the close-up face shot
-    camera.attachControl(ref.current, true);
+    if (interactive) camera.attachControl(ref.current, true);
     camera.lowerRadiusLimit = camera.upperRadiusLimit = camera.radius;
     camera.upperBetaLimit = camera.lowerBetaLimit = camera.beta;
     new HemisphericLight('a', new Vector3(0, 1, 0.3), scene).intensity = 0.9;
@@ -43,7 +56,7 @@ function Preview({ look, framing }: { look: Look; framing: 'face' | 'full' }) {
     return () => { window.removeEventListener('resize', onResize); scene.dispose(); engine.dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lookKey, framing]);
-  return <canvas ref={ref} className={`preview-canvas ${framing}`} />;
+  return <canvas ref={ref} className={`preview-canvas ${framing} ${interactive ? '' : 'passive'}`} />;
 }
 
 function FacePad({ label, axes, x, y, onChange }: { label: [string, string, string, string]; axes?: string; x: number; y: number; onChange: (x: number, y: number) => void }) {
@@ -91,10 +104,23 @@ type Props = {
   initial: Identity;
   saving: boolean;
   onComplete: (identity: Identity) => void;
+  /** Open at a given panel (e.g. 4 = preferences) when editing from Profile. */
+  initialStep?: number;
+  /** 'edit' = opened from Profile: final button saves and returns, and Cancel is shown. */
+  mode?: 'onboarding' | 'edit';
+  onCancel?: () => void;
 };
 
-export function Creator({ initial, saving, onComplete }: Props) {
-  const [step, setStep] = useState(1);
+export function Creator({ initial, saving, onComplete, initialStep = 1, mode = 'onboarding', onCancel }: Props) {
+  const [step, setStep] = useState(initialStep);
+  const [bio, setBio] = useState(initial.bio);
+  const [intent, setIntent] = useState(initial.intent || 'socialize');
+  const [prefs, setPrefs] = useState<Preferences>(initial.preferences);
+  const setPref = <K extends keyof Preferences>(key: K, value: Preferences[K]) => setPrefs((p) => ({ ...p, [key]: value }));
+  const toggleIn = (key: 'interests' | 'boundaries' | 'show_me', id: string, max = 99) => setPrefs((p) => {
+    const list = p[key];
+    return { ...p, [key]: list.includes(id) ? list.filter((x) => x !== id) : list.length >= max ? list : [...list, id] };
+  });
   const [alias, setAlias] = useState(initial.alias);
   const [gender, setGender] = useState(initial.gender);
   const [likes, setLikes] = useState<string[]>(initial.likes);
@@ -112,10 +138,13 @@ export function Creator({ initial, saving, onComplete }: Props) {
     setLook((l) => ({ ...l, style: id, top: s.outfit.top, bottom: gender === 'male' && s.id === 'glam' ? 'trousers_black' : s.outfit.bottom, accessory: s.outfit.accessory }));
   };
 
-  const canNext = step !== 1 || (alias.trim().length >= 2 && likes.length > 0);
+  const step1Ok = alias.trim().length >= 2 && likes.length > 0;
+  const canNext = step !== 1 || step1Ok;
+  const canFinish = step1Ok;
 
   return <div className="creator">
     <div className="creator-card">
+      {mode === 'edit' && onCancel && <button className="creator-cancel icon-btn" aria-label="Cancel editing" onClick={onCancel}>×</button>}
       {step === 1 && <>
         <h2>Create your profile</h2>
         <p className="creator-sub">Create your identity.</p>
@@ -176,6 +205,35 @@ export function Creator({ initial, saving, onComplete }: Props) {
       </>}
 
       {step === 4 && <>
+        <h2>Your preferences</h2>
+        <p className="creator-sub">Who and what you're here for.</p>
+        <label>I'm here to</label>
+        <div className="trait-row">
+          {INTENTS.map((i) => <button key={i.id} className={`trait ${intent === i.id ? 'selected' : ''}`} onClick={() => setIntent(i.id)}>{i.icon} {i.label}</button>)}
+        </div>
+        <label>Relationship style</label>
+        <div className="trait-row">
+          {RELATIONSHIP_STYLES.map((r) => <button key={r.id} className={`trait ${prefs.relationship_style === r.id ? 'selected' : ''}`} onClick={() => setPref('relationship_style', prefs.relationship_style === r.id ? '' : r.id)}>{r.label}</button>)}
+        </div>
+        <Toggle label="Show on my profile" checked={prefs.public_relationship_style} onChange={(v) => setPref('public_relationship_style', v)} />
+        <label>Interests <em>(up to {MAX_INTERESTS})</em></label>
+        <div className="trait-row">
+          {INTERESTS.map((i) => <button key={i} className={`trait ${prefs.interests.includes(i) ? 'selected' : ''}`} onClick={() => toggleIn('interests', i, MAX_INTERESTS)}>{i}</button>)}
+        </div>
+        <Toggle label="Show on my profile" checked={prefs.public_interests} onChange={(v) => setPref('public_interests', v)} />
+        <label>Boundaries <em>(never invite me to)</em></label>
+        <div className="trait-row">
+          {INVITATION_TYPES.map((b) => <button key={b.id} className={`trait boundary ${prefs.boundaries.includes(b.id) ? 'selected' : ''}`} onClick={() => toggleIn('boundaries', b.id)}>{prefs.boundaries.includes(b.id) ? '⛔ ' : ''}{b.label}</button>)}
+        </div>
+        <p className="creator-hint">Nobody can send you these. You can still decline anything else, any time.</p>
+        <label>Show me <em>(none selected = everyone)</em></label>
+        <div className="trait-row">
+          {SHOW_ME.map((g) => <button key={g.id} className={`trait ${prefs.show_me.includes(g.id) ? 'selected' : ''}`} onClick={() => toggleIn('show_me', g.id)}>{g.label}</button>)}
+        </div>
+        <Toggle label="Discoverable" hint="Appear in other players' Nearby lists" checked={prefs.discoverable} onChange={(v) => setPref('discoverable', v)} />
+      </>}
+
+      {step === 5 && <>
         <h2>Identity complete</h2>
         <p className="creator-sub">Final review.</p>
         <div className="review-card">
@@ -190,18 +248,33 @@ export function Creator({ initial, saving, onComplete }: Props) {
             <dt>Style:</dt><dd>[{STYLES.find((s) => s.id === look.style)?.label}] · {findItem(TOPS, look.top).label}, {findItem(BOTTOMS, look.bottom).label}</dd>
           </dl>
           <div className="match-code">{code} (unique match)</div>
-          <p className="checks">Step 1 process complete: <b>✔ Looks</b> <b>✔ Outfit</b> <b>✔ Name</b></p>
+          <p className="checks">Step 1 process complete: <b>✔ Looks</b> <b>✔ Outfit</b> <b>✔ Name</b> <b>✔ Preferences</b></p>
         </div>
-        <button className="enter-city" disabled={saving} onClick={() => onComplete({ alias: alias.trim(), gender, likes, look, match_code: code })}>
-          {saving ? 'Saving…' : '[ Enter the city → ]'}
+        <div className="public-preview">
+          <h4>How others see you</h4>
+          <textarea value={bio} maxLength={MAX_BIO_CHARS} rows={2} placeholder="Add a short bio (optional)" onChange={(e) => setBio(e.target.value)} />
+          <div className="bio-count">{bio.length}/{MAX_BIO_CHARS}</div>
+          <div className="pill-row">
+            {prefs.public_relationship_style && prefs.relationship_style && <span className="pill">{labelOf(RELATIONSHIP_STYLES, prefs.relationship_style)}</span>}
+            {prefs.public_interests && prefs.interests.map((i) => <span key={i} className="pill">{i}</span>)}
+            {!(prefs.public_interests && prefs.interests.length) && !(prefs.public_relationship_style && prefs.relationship_style) && <span className="pill muted">No public details</span>}
+          </div>
+          <p className="visibility">{prefs.discoverable ? '👁 Visible in Nearby lists' : '🙈 Hidden from Nearby lists'} · intent and boundaries stay private</p>
+          <div className="preview-edit">
+            <button className="ghost" onClick={() => setStep(1)}>[ Edit character ]</button>
+            <button className="ghost" onClick={() => setStep(4)}>[ Edit preferences ]</button>
+          </div>
+        </div>
+        <button className="enter-city" disabled={saving || !canFinish} onClick={() => onComplete({ alias: alias.trim(), gender, likes, look, match_code: code, bio: bio.trim(), intent, preferences: prefs })}>
+          {saving ? 'Saving…' : mode === 'edit' ? '[ Save changes → ]' : '[ Enter the city → ]'}
         </button>
       </>}
 
       <div className="creator-nav">
         {step > 1 ? <button className="ghost" onClick={() => setStep((s) => s - 1)}>[ Back ]</button> : <span />}
-        {step < 4 && <button disabled={!canNext} onClick={() => setStep((s) => s + 1)}>{step === 3 ? '[ Review ]' : '[ Next ]'}</button>}
+        {step < STEPS && <button disabled={!canNext} onClick={() => setStep((s) => s + 1)}>{step === STEPS - 1 ? '[ Review ]' : '[ Next ]'}</button>}
       </div>
-      <div className="creator-step">({step}/4)</div>
+      <div className="creator-step">({step}/{STEPS})</div>
     </div>
   </div>;
 }

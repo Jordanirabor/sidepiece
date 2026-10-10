@@ -13,6 +13,22 @@ use sidepiece_common::ApiOk;
 use sqlx::Row;
 use uuid::Uuid;
 
+/// New players start with this much cash (₦). Mirrors the `player_life.money` column default.
+pub const STARTING_MONEY: i32 = 50_000;
+
+/// Format naira with thousands separators, e.g. `₦85,000` / `-₦3,500`.
+pub fn naira(amount: i32) -> String {
+    let digits = amount.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("{}₦{out}", if amount < 0 { "-" } else { "" })
+}
+
 /// One real hour is one in-game day.
 const TIME_SCALE: i64 = 24;
 
@@ -134,10 +150,13 @@ struct LifeRow {
 }
 
 async fn load(state: &SharedState, player_id: Uuid) -> Result<LifeRow, AppError> {
-    sqlx::query("insert into player_life (player_id) values ($1) on conflict do nothing")
-        .bind(player_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "insert into player_life (player_id, money) values ($1, $2) on conflict do nothing",
+    )
+    .bind(player_id)
+    .bind(STARTING_MONEY)
+    .execute(&state.db)
+    .await?;
     let row = sqlx::query(
         "select money, xp, energy, hunger, mood, social, love,
                 extract(epoch from (now() - updated_at))::float8 as elapsed
@@ -200,7 +219,11 @@ pub async fn apply(
 ) -> Result<LifeResponse, AppError> {
     let mut life = load(state, player_id).await?;
     if life.money + d.money < 0 {
-        return Err(AppError::bad_request("not enough money"));
+        return Err(AppError::bad_request(&format!(
+            "not enough cash: that costs {}, you have {}",
+            naira(-d.money),
+            naira(life.money)
+        )));
     }
     let before_level = level_for_xp(life.xp).0;
     life.money += d.money;
@@ -263,10 +286,10 @@ pub struct ActionDef {
 pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: "buy_drink",
-        label: "Buy a drink ($15)",
+        label: "Buy a drink (₦3,500)",
         venues: &["neon_lounge", "rooftop_party"],
         delta: LifeDelta {
-            money: -15,
+            money: -3_500,
             xp: 2,
             energy: 0.0,
             hunger: 2.0,
@@ -278,10 +301,10 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: "eat",
-        label: "Grab food ($20)",
+        label: "Grab food (₦5,000)",
         venues: &["neon_lounge", "rooftop_party", "city"],
         delta: LifeDelta {
-            money: -20,
+            money: -5_000,
             xp: 1,
             energy: 5.0,
             hunger: 45.0,
@@ -308,10 +331,10 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: "work_shift",
-        label: "Work a shift (+$80)",
+        label: "Work a shift (+₦18,000)",
         venues: &["city"],
         delta: LifeDelta {
-            money: 80,
+            money: 18_000,
             xp: 6,
             energy: -25.0,
             hunger: -15.0,
@@ -435,5 +458,41 @@ mod tests {
         assert_eq!(world_clock(t0 + Duration::minutes(30)).hour, 6); // +12 game hours
         assert!(world_clock(t0).is_night == false);
         assert!(world_clock(t0 + Duration::minutes(10)).is_night); // 22:00
+    }
+
+    #[test]
+    fn naira_formatting() {
+        assert_eq!(naira(0), "\u{20a6}0");
+        assert_eq!(naira(950), "\u{20a6}950");
+        assert_eq!(naira(3_500), "\u{20a6}3,500");
+        assert_eq!(naira(85_000), "\u{20a6}85,000");
+        assert_eq!(naira(1_250_000), "\u{20a6}1,250,000");
+        assert_eq!(naira(-3_500), "-\u{20a6}3,500");
+    }
+
+    #[test]
+    fn action_labels_match_naira_deltas() {
+        for a in ACTIONS {
+            assert!(!a.label.contains('$'), "{} still shows $", a.id);
+            if a.delta.money != 0 {
+                let shown = naira(a.delta.money.abs());
+                assert!(
+                    a.label.contains(&shown),
+                    "{} label {:?} should show {shown}",
+                    a.id,
+                    a.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn economy_is_balanced() {
+        let cost = |id: &str| -ACTIONS.iter().find(|a| a.id == id).unwrap().delta.money;
+        let shift = -cost("work_shift");
+        // A shift pays for a night out (several drinks + food); starting cash covers a first night.
+        assert!(shift >= 3 * cost("buy_drink") + cost("eat"));
+        assert!(STARTING_MONEY >= 10 * cost("buy_drink"));
+        assert!(STARTING_MONEY < 5 * shift, "working should matter");
     }
 }

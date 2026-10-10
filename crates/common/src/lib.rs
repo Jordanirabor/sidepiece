@@ -64,6 +64,174 @@ pub struct AvatarConfig {
     /// Short shareable code shown on the "Identity complete" card.
     #[serde(default)]
     pub match_code: String,
+    /// Optional public bio shown on the profile preview and to others.
+    #[serde(default)]
+    pub bio: String,
+    /// Onboarding preferences (spec Screen 04). Private unless a `public_*` flag says otherwise.
+    #[serde(default)]
+    pub preferences: Preferences,
+}
+
+/// Spec Screen 04: relationship style, interests, boundaries and discovery settings.
+/// (Intent lives on `AvatarConfig::intent`.) Every field defaults so old rows still load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Preferences {
+    /// One of `RELATIONSHIP_STYLES`, or empty if not set.
+    #[serde(default)]
+    pub relationship_style: String,
+    /// Up to `MAX_INTERESTS` of `INTERESTS`.
+    #[serde(default)]
+    pub interests: Vec<String>,
+    /// Invitation types (`INVITATION_TYPES`) this player does not want to receive.
+    #[serde(default)]
+    pub boundaries: Vec<String>,
+    /// Genders this player wants to encounter in discovery. Empty = everyone.
+    #[serde(default)]
+    pub show_me: Vec<String>,
+    /// Appear in other players' discovery lists.
+    #[serde(default = "yes")]
+    pub discoverable: bool,
+    #[serde(default)]
+    pub public_relationship_style: bool,
+    #[serde(default = "yes")]
+    pub public_interests: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            relationship_style: String::new(),
+            interests: Vec::new(),
+            boundaries: Vec::new(),
+            show_me: Vec::new(),
+            discoverable: true,
+            public_relationship_style: false,
+            public_interests: true,
+        }
+    }
+}
+
+pub const GENDERS: &[&str] = &["male", "female", "non_binary"];
+pub const RELATIONSHIP_STYLES: &[&str] = &["casual_dating", "committed", "non_exclusive", "open"];
+pub const INTERESTS: &[&str] = &[
+    "Afrobeats",
+    "Amapiano",
+    "Rooftop parties",
+    "Lounges & cocktails",
+    "Dancing",
+    "Food spots",
+    "Live music",
+    "Art & fashion",
+    "Beach days",
+    "Gaming",
+    "Fitness",
+    "Movies",
+];
+pub const MAX_INTERESTS: usize = 5;
+pub const MAX_LIKES: usize = 3;
+pub const MAX_BIO_CHARS: usize = 160;
+/// Invitation kinds from spec Screen 10. Boundaries opt out of these.
+pub const INVITATION_TYPES: &[&str] = &["public_date", "venue_visit", "private_location"];
+
+/// Validate and normalise a player-submitted avatar. Rejects unknown catalog values
+/// instead of silently dropping them (our client only sends known ids).
+pub fn validate_avatar(mut a: AvatarConfig) -> Result<AvatarConfig, String> {
+    a.display_name = a.display_name.trim().to_string();
+    let name_len = a.display_name.chars().count();
+    if !(2..=24).contains(&name_len) {
+        return Err("alias must be 2-24 characters".into());
+    }
+    if !a.gender.is_empty() && !GENDERS.contains(&a.gender.as_str()) {
+        return Err("unknown gender".into());
+    }
+    a.bio = a.bio.trim().to_string();
+    if a.bio.chars().count() > MAX_BIO_CHARS {
+        return Err(format!("bio must be at most {MAX_BIO_CHARS} characters"));
+    }
+    let check = |values: &mut Vec<String>, catalog: &[&str], max: usize, what: &str| {
+        let mut seen = std::collections::HashSet::new();
+        values.retain(|v| seen.insert(v.clone()));
+        if values.len() > max {
+            return Err(format!("pick at most {max} {what}"));
+        }
+        match values.iter().find(|v| !catalog.contains(&v.as_str())) {
+            Some(bad) => Err(format!("unknown {what}: {bad}")),
+            None => Ok(()),
+        }
+    };
+    check(&mut a.likes, PARTNER_TRAITS, MAX_LIKES, "likes")?;
+    let p = &mut a.preferences;
+    if !p.relationship_style.is_empty()
+        && !RELATIONSHIP_STYLES.contains(&p.relationship_style.as_str())
+    {
+        return Err("unknown relationship style".into());
+    }
+    check(&mut p.interests, INTERESTS, MAX_INTERESTS, "interests")?;
+    check(
+        &mut p.boundaries,
+        INVITATION_TYPES,
+        INVITATION_TYPES.len(),
+        "boundaries",
+    )?;
+    check(&mut p.show_me, GENDERS, GENDERS.len(), "genders")?;
+    Ok(a)
+}
+
+/// Whether `viewer` should see `other` in discovery: `other` must be discoverable, and each
+/// side's "show me" must include the other's gender (mutual; empty means everyone).
+pub fn visible_in_discovery(viewer: &AvatarConfig, other: &AvatarConfig) -> bool {
+    let wants = |who: &AvatarConfig, gender: &str| {
+        who.preferences.show_me.is_empty()
+            || gender.is_empty()
+            || who.preferences.show_me.iter().any(|g| g == gender)
+    };
+    other.preferences.discoverable && wants(viewer, &other.gender) && wants(other, &viewer.gender)
+}
+
+fn intent_group(i: &PlayerIntent) -> u8 {
+    match i {
+        PlayerIntent::Socialize => 0,
+        PlayerIntent::Flirt | PlayerIntent::CasualDating | PlayerIntent::Explore => 1,
+        PlayerIntent::Relationship => 2,
+    }
+}
+
+/// Player-to-player compatibility (0-99) from shared partner tastes, intent, relationship
+/// style and interests. Only the number leaves the server, never the private inputs.
+pub fn player_compatibility(a: &AvatarConfig, b: &AvatarConfig) -> u32 {
+    let mut score: i32 = 50;
+    let shared = |x: &[String], y: &[String]| x.iter().filter(|v| y.contains(v)).count() as i32;
+    score += 8 * shared(&a.likes, &b.likes);
+    score += 3 * shared(&a.preferences.interests, &b.preferences.interests).min(4);
+    // Intent: same goal is great; casual vs. relationship-seeking is a real mismatch.
+    let (ia, ib) = (intent_group(&a.intent), intent_group(&b.intent));
+    score += if std::mem::discriminant(&a.intent) == std::mem::discriminant(&b.intent) {
+        12
+    } else if ia == ib || ia == 0 || ib == 0 {
+        5
+    } else {
+        -8
+    };
+    // Relationship style: unknown is neutral; committed vs. non-exclusive/open conflicts.
+    let (sa, sb) = (
+        a.preferences.relationship_style.as_str(),
+        b.preferences.relationship_style.as_str(),
+    );
+    if !sa.is_empty() && !sb.is_empty() {
+        let conflict = |x: &str, y: &str| x == "committed" && (y == "non_exclusive" || y == "open");
+        score += if sa == sb {
+            10
+        } else if conflict(sa, sb) || conflict(sb, sa) {
+            -10
+        } else {
+            3
+        };
+    }
+    score.clamp(5, 99) as u32
 }
 
 fn default_intent() -> PlayerIntent {
@@ -130,6 +298,103 @@ pub struct DiscoverableProfile {
     /// NPC-only: where they stand and how they look in the venue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub npc: Option<NpcPresence>,
+    /// Public profile details (players only; respects their public/private toggles).
+    #[serde(default)]
+    pub bio: String,
+    #[serde(default)]
+    pub interests: Vec<String>,
+    #[serde(default)]
+    pub relationship_style: Option<String>,
+    /// Invitation types this profile accepts (all minus their boundaries).
+    #[serde(default)]
+    pub open_to: Vec<String>,
+    /// Their avatar, for portraits on cards (the same avatar everyone sees in the world).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<AvatarLook>,
+    /// In a venue right now (`location` then names it).
+    #[serde(default)]
+    pub online: bool,
+}
+
+/// Spec Screen 07: Like/Pass deck. Players first; NPCs fill in when players run out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverDeck {
+    pub profiles: Vec<DiscoverableProfile>,
+    /// True when no players are left and the deck is NPCs only.
+    pub fallback: bool,
+}
+
+/// Spec Screen 08: a mutual match, as seen by one side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchView {
+    pub target_id: String,
+    pub display_name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<AvatarLook>,
+    pub matched_at: DateTime<Utc>,
+    /// Not yet shown to this player (drives the match moment for the side that didn't act).
+    pub is_new: bool,
+    pub online: bool,
+    /// Venue name if online.
+    pub location: String,
+    /// Venue kind if online in a public venue (`city`, `neon_lounge`, ...), so the client can go there.
+    #[serde(default)]
+    pub venue: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmMessageView {
+    pub id: String,
+    pub sender_id: PlayerId,
+    pub recipient_id: PlayerId,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<DateTime<Utc>>,
+    pub outgoing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationView {
+    pub target_id: String,
+    pub display_name: String,
+    /// "player" or "npc".
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<AvatarLook>,
+    pub last_message: String,
+    pub updated_at: DateTime<Utc>,
+    pub unread_count: i64,
+    pub online: bool,
+    pub location: String,
+    #[serde(default)]
+    pub venue: String,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub ended: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxResponse {
+    pub conversations: Vec<ConversationView>,
+    pub unread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmThreadResponse {
+    pub target_id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<AvatarLook>,
+    pub online: bool,
+    pub location: String,
+    #[serde(default)]
+    pub venue: String,
+    pub muted: bool,
+    pub ended: bool,
+    pub messages: Vec<DmMessageView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +429,12 @@ pub struct InterestResult {
     pub player_id: PlayerId,
     pub target_id: String,
     pub intent: String,
+    /// "interest_recorded" or "matched".
     pub status: String,
+    #[serde(default)]
+    pub matched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_info: Option<MatchView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,6 +566,98 @@ mod tests {
         let cfg: AvatarConfig = serde_json::from_value(old).unwrap();
         assert_eq!(cfg.display_name, "Jay");
         assert_eq!(cfg.look, AvatarLook::default());
+    }
+
+    fn avatar(gender: &str) -> AvatarConfig {
+        serde_json::from_value(serde_json::json!({ "display_name": "Test", "gender": gender }))
+            .unwrap()
+    }
+
+    #[test]
+    fn old_rows_get_safe_preference_defaults() {
+        let cfg = avatar("female");
+        assert!(
+            cfg.preferences.discoverable,
+            "old players stay discoverable"
+        );
+        assert!(cfg.preferences.show_me.is_empty());
+        assert!(!cfg.preferences.public_relationship_style);
+        assert_eq!(cfg.bio, "");
+    }
+
+    #[test]
+    fn validation_rejects_unknown_and_oversized_values() {
+        let mut a = avatar("female");
+        a.display_name = "  Ada  ".into();
+        a.preferences.interests = vec!["Afrobeats".into(), "Dancing".into()];
+        let ok = validate_avatar(a.clone()).unwrap();
+        assert_eq!(ok.display_name, "Ada");
+
+        let mut bad = a.clone();
+        bad.preferences.interests = vec!["Skydiving".into()];
+        assert!(validate_avatar(bad).is_err());
+        let mut bad = a.clone();
+        bad.preferences.boundaries = vec!["sleepover".into()];
+        assert!(validate_avatar(bad).is_err());
+        let mut bad = a.clone();
+        bad.preferences.relationship_style = "complicated".into();
+        assert!(validate_avatar(bad).is_err());
+        let mut bad = a.clone();
+        bad.bio = "x".repeat(MAX_BIO_CHARS + 1);
+        assert!(validate_avatar(bad).is_err());
+        let mut bad = a.clone();
+        bad.preferences.interests = INTERESTS.iter().map(|s| s.to_string()).collect();
+        assert!(validate_avatar(bad).is_err(), "too many interests");
+        let mut bad = a;
+        bad.display_name = "x".into();
+        assert!(validate_avatar(bad).is_err());
+    }
+
+    #[test]
+    fn discovery_respects_show_me_both_ways_and_discoverable() {
+        let mut man = avatar("male");
+        let mut woman = avatar("female");
+        assert!(visible_in_discovery(&man, &woman));
+        woman.preferences.show_me = vec!["female".into()];
+        assert!(
+            !visible_in_discovery(&man, &woman),
+            "she doesn't want to see men"
+        );
+        assert!(!visible_in_discovery(&woman, &man));
+        woman.preferences.show_me = vec![];
+        man.preferences.show_me = vec!["male".into()];
+        assert!(!visible_in_discovery(&man, &woman));
+        man.preferences.show_me = vec![];
+        woman.preferences.discoverable = false;
+        assert!(!visible_in_discovery(&man, &woman));
+        assert!(
+            visible_in_discovery(&woman, &man),
+            "hiding yourself doesn't hide others"
+        );
+    }
+
+    #[test]
+    fn compatibility_uses_intent_and_style() {
+        let mut a = avatar("female");
+        let mut b = avatar("male");
+        a.intent = PlayerIntent::Relationship;
+        b.intent = PlayerIntent::Relationship;
+        a.preferences.relationship_style = "committed".into();
+        b.preferences.relationship_style = "committed".into();
+        let aligned = player_compatibility(&a, &b);
+        b.intent = PlayerIntent::Explore;
+        b.preferences.relationship_style = "open".into();
+        let clashing = player_compatibility(&a, &b);
+        assert!(aligned >= 70, "aligned {aligned}");
+        assert!(clashing < 40, "clashing {clashing}");
+        a.likes = vec!["Caring".into()];
+        b.likes = vec!["Caring".into()];
+        assert!(player_compatibility(&a, &b) > clashing, "shared likes help");
+        assert_eq!(
+            player_compatibility(&a, &b),
+            player_compatibility(&b, &a),
+            "symmetric"
+        );
     }
 }
 

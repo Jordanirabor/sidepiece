@@ -50,7 +50,8 @@ crates/common/       Shared wire types (AvatarLook, ClientEvent/ServerEvent, tie
 migrations/          sqlx migrations (run automatically by api/event-worker on start)
 web/src/             main.tsx (app flow), Creator.tsx (4-panel creator), SceneView.tsx (3D world + realtime),
                      venue.ts (venues + humanoid), look.ts (appearance model/catalogs), Hud.tsx (HUD + NPC chat), api.ts
-scripts/             smoke.mjs (API two-player flow), ui-check.mjs (headless browser walkthrough + screenshots)
+scripts/             smoke.mjs (API two-player flow; Node built-ins only)
+web/scripts/         ui-check.mjs (headless browser walkthrough + screenshots; puppeteer-core is a web devDependency)
 docs/                product truth, references, decisions, roadmap
 deploy/dokploy.md    production deploy guide
 ```
@@ -62,7 +63,7 @@ docker compose -f docker-compose.dev.yml up --build   # hot reload: web :3001, a
 cargo fmt && cargo check && cargo test                 # 0 warnings expected
 cd web && pnpm build                                   # type-check + bundle
 node scripts/smoke.mjs                                 # end-to-end API flow (dev stack running)
-CHROME_PATH=… SHOTS_DIR=/tmp/shots node scripts/ui-check.mjs   # then LOOK at the screenshots
+cd web && CHROME_PATH=… SHOTS_DIR=/tmp/shots pnpm ui-check   # phone + desktop; then LOOK at the screenshots
 ```
 
 **Definition of done** for any change:

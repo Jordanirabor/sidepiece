@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArcRotateCamera, Color3, Engine, Scene, Vector3 } from '@babylonjs/core';
+import { ArcRotateCamera, Camera, Color3, Engine, Scene, Vector3 } from '@babylonjs/core';
 import { buildVenue, Humanoid, makeHumanoid, makeLabel, Portal } from './venue';
 import { Look } from './look';
 
@@ -43,6 +43,10 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
   const remotesRef = useRef<Map<string, Remote>>(new Map());
   const pendingLooksRef = useRef<Map<string, { look: Look; name: string }>>(new Map());
   const keysRef = useRef<Set<string>>(new Set());
+  const moveVecRef = useRef<{ x: number; z: number }>({ x: 0, z: 0 });
+  const joyOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const [joy, setJoy] = useState<{ x: number; y: number } | null>(null);
+  const JOY_R = 46;
   const targetRef = useRef<Target | null>(null);
   const interactRef = useRef(onInteractNpc);
   const portalRef = useRef(onPortal);
@@ -86,7 +90,7 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
     const venue = buildVenue(scene, venueKind);
 
     // Third-person, slightly over the shoulder, behind the player (player spawns facing +Z).
-    const camera = new ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.55, 7.5, venue.playerSpawn.add(new Vector3(0, 1.2, 0)), scene);
+    const camera = new ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.25, 7.5, venue.playerSpawn.add(new Vector3(0, 1.2, 0)), scene);
     camera.minZ = 0.1;
     camera.attachControl(canvasRef.current, true);
     camera.lowerRadiusLimit = 4;
@@ -145,13 +149,16 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
       if (keys.has('s') || keys.has('arrowdown')) fz -= 1;
       if (keys.has('a') || keys.has('arrowleft')) fx -= 1;
       if (keys.has('d') || keys.has('arrowright')) fx += 1;
-      const moving = fx !== 0 || fz !== 0;
+      fx += moveVecRef.current.x;
+      fz += moveVecRef.current.z;
+      const mag = Math.min(1, Math.hypot(fx, fz));
+      const moving = mag > 0.06;
       if (moving) {
         const forward = camera.getForwardRay().direction;
         const fwd = new Vector3(forward.x, 0, forward.z).normalize();
         const right = Vector3.Cross(Vector3.Up(), fwd).normalize();
         const dir = fwd.scale(fz).add(right.scale(fx)).normalize();
-        local.root.position.addInPlace(dir.scale(3.2 * dt));
+        local.root.position.addInPlace(dir.scale(3.2 * mag * dt));
         local.root.rotation.y = Math.atan2(dir.x, dir.z);
         const b = venue.bounds;
         local.root.position.x = Math.max(-b.x, Math.min(b.x, local.root.position.x));
@@ -198,7 +205,14 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
       scene.render();
     });
 
-    const onResize = () => engine.resize();
+    // Portrait phones: fix the horizontal FOV so the world isn't a narrow slit behind the avatar.
+    const fitFov = () => {
+      const portrait = engine.getRenderWidth() < engine.getRenderHeight();
+      camera.fovMode = portrait ? Camera.FOVMODE_HORIZONTAL_FIXED : Camera.FOVMODE_VERTICAL_FIXED;
+      camera.fov = portrait ? 0.95 : 0.8;
+    };
+    fitFov();
+    const onResize = () => { engine.resize(); fitFov(); };
     window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
@@ -274,7 +288,7 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
           break;
       }
     };
-    ws.onclose = () => pushChat({ who: 'system', text: 'Connection lost — rejoin from the city', system: true });
+    ws.onclose = () => pushChat({ who: 'system', text: 'Connection lost. Head back to Lekki to rejoin', system: true });
     return () => {
       ws.onclose = null; // intentional room switch, not a disconnect
       ws.close();
@@ -293,12 +307,35 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
   return <section className="stage">
     <canvas className="scene" ref={canvasRef} />
     <div className="venue-badge">
-      <span>{room?.kind === 'private_room' ? 'Private Scene' : room?.kind === 'city' ? 'Downtown' : 'Venue'}</span>
+      <span>{room?.kind === 'private_room' ? 'Private Scene' : room?.kind === 'city' ? 'Lagos' : 'Venue'}</span>
       <strong>{room ? room.display_name : 'Preview'}</strong>
     </div>
-    <div className="controls-hint">WASD to move · drag to look · E to interact</div>
+    <div className="controls-hint">Drag the pad or WASD to move · tap a glowing prompt to interact</div>
+    <div
+      className="joystick"
+      onPointerDown={(e) => {
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        joyOriginRef.current = { x: e.clientX, y: e.clientY };
+        setJoy({ x: 0, y: 0 });
+      }}
+      onPointerMove={(e) => {
+        const o = joyOriginRef.current;
+        if (!o) return;
+        let dx = e.clientX - o.x;
+        let dy = e.clientY - o.y;
+        const d = Math.hypot(dx, dy);
+        if (d > JOY_R) { dx = (dx / d) * JOY_R; dy = (dy / d) * JOY_R; }
+        setJoy({ x: dx, y: dy });
+        // Screen up = forward (+z), right = +x.
+        moveVecRef.current = { x: dx / JOY_R, z: -dy / JOY_R };
+      }}
+      onPointerUp={(e) => { (e.target as HTMLElement).releasePointerCapture?.(e.pointerId); joyOriginRef.current = null; moveVecRef.current = { x: 0, z: 0 }; setJoy(null); }}
+      onPointerCancel={() => { joyOriginRef.current = null; moveVecRef.current = { x: 0, z: 0 }; setJoy(null); }}
+    >
+      <span className="joystick-knob" style={{ transform: `translate(${joy?.x ?? 0}px, ${joy?.y ?? 0}px)` }} />
+    </div>
     {target && <button className="interact-prompt" onClick={() => activate(target)}>
-      <kbd>E</kbd> {target.type === 'npc' ? `Talk to ${target.npc.name}` : target.portal.kind === 'city' ? 'Back to the city' : `Enter ${target.portal.label}`}
+      <kbd>E</kbd> {target.type === 'npc' ? `Talk to ${target.npc.name}` : target.portal.kind === 'city' ? `Back to ${target.portal.label}` : `Enter ${target.portal.label}`}
     </button>}
     <div className="chat-panel">
       <div className="chat-log">

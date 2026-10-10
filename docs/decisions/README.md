@@ -11,7 +11,9 @@ make us revisit it. **Do not reverse a decision silently.** Write a new record t
 | 0004 | [Stylized 3D art direction (not photoreal)](0004-stylized-3d-art.md) | Accepted |
 | 0005 | [NPC conversation: free-text, scored, provider-agnostic LLM](0005-npc-conversation.md) | Accepted |
 | 0006 | [Onboarding shape: mockup creator + preferences + preview](0006-onboarding-shape.md) | Accepted |
-| 0007 | [Lagos setting and ₦ currency](0007-lagos-setting.md) | Accepted, not yet implemented |
-| 0008 | [Mobile-first persistent shell](0008-mobile-first-shell.md) | Accepted, not yet implemented |
+| 0007 | [Lagos setting and ₦ currency](0007-lagos-setting.md) | Accepted, implemented (M2) |
+| 0008 | [Mobile-first persistent shell](0008-mobile-first-shell.md) | Accepted, implemented (M1) |
+| 0009 | [Onboarding order: preferences inside the mockup flow](0009-onboarding-order.md) | Accepted, implemented (M3); refines 0006 |
+| 0010 | [Discover deck, matching rules and entry points](0010-discover-and-matching.md) | Accepted, implemented (M4) |
 
 Template: `NNNN-short-title.md` with **Context · Decision · Consequences · Revisit when**.

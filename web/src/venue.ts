@@ -250,6 +250,94 @@ export function makeHumanoid(scene: Scene, name: string, look: Look, accent: Col
 
 export type Humanoid = ReturnType<typeof makeHumanoid>;
 
+/**
+ * Lagos waterfront backdrop: lagoon, a tall Eko/VI-style skyline and a cable-stayed link bridge
+ * (a nod to the Lekki-Ikoyi bridge). Stylized silhouettes only, so cheap: shared materials, one line system.
+ * `z` is where the bridge crosses; `y` is the water level relative to the venue floor.
+ */
+export function addLagosSkyline(scene: Scene, opts: { z: number; y: number; width: number }) {
+  const { z, y, width } = opts;
+  const unfogged = (m: StandardMaterial) => { m.fogEnabled = false; return m; };
+
+  const water = MeshBuilder.CreateGround('lagoon', { width: width * 1.4, height: 70 }, scene);
+  water.position = new Vector3(0, y, z + 18);
+  const waterMat = unfogged(material(scene, 'lagoon-mat', new Color3(0.02, 0.03, 0.08), new Color3(0.03, 0.05, 0.14)));
+  waterMat.specularColor = new Color3(0.5, 0.45, 0.7);
+  water.material = waterMat;
+
+  // Skyline: deterministic towers with a few shared materials (lit floors read as emissive bands).
+  const towerMats = [
+    new Color3(0.08, 0.06, 0.2), new Color3(0.12, 0.07, 0.24), new Color3(0.05, 0.08, 0.2), new Color3(0.16, 0.08, 0.22),
+  ].map((e, i) => unfogged(material(scene, `skyline-mat-${i}`, new Color3(0.03, 0.03, 0.07), e)));
+  const bandMat = unfogged(material(scene, 'skyline-band', Color3.Black(), new Color3(0.95, 0.72, 0.42)));
+  const beaconMat = unfogged(material(scene, 'skyline-beacon', Color3.Black(), new Color3(1, 0.1, 0.15)));
+  const beacons: Mesh[] = [];
+  const count = 30;
+  for (let i = 0; i < count; i++) {
+    const x = -width / 2 + (i + 0.5) * (width / count) + (((i * 37) % 7) - 3);
+    const h = 8 + ((i * 53) % 23) + (Math.abs(x) < width * 0.2 ? 10 : 0); // taller towards the centre (VI/Eko)
+    const w = 2.5 + ((i * 11) % 4);
+    const tz = z + 14 + ((i * 29) % 12);
+    const tower = MeshBuilder.CreateBox(`skyline-${i}`, { width: w, height: h, depth: w }, scene);
+    tower.position = new Vector3(x, y + h / 2, tz);
+    tower.material = towerMats[i % towerMats.length];
+    for (let b = 0; b < Math.floor(h / 6); b++) {
+      if ((i + b) % 3 === 0) continue;
+      const band = MeshBuilder.CreatePlane(`skyline-${i}-band-${b}`, { width: w * 0.8, height: 0.25 }, scene);
+      band.position = new Vector3(x, y + 3 + b * 5.5, tz - w / 2 - 0.02);
+      band.material = bandMat;
+    }
+    if (h > 24) {
+      const beacon = MeshBuilder.CreateSphere(`skyline-${i}-beacon`, { diameter: 0.5 }, scene);
+      beacon.position = new Vector3(x, y + h + 0.3, tz);
+      beacon.material = beaconMat;
+      beacons.push(beacon);
+    }
+  }
+
+  // Cable-stayed bridge: deck, one tall pylon, fanned cables, warm deck lights.
+  const deckY = y + 3;
+  const deck = MeshBuilder.CreateBox('bridge-deck', { width: width, height: 0.5, depth: 1.6 }, scene);
+  deck.position = new Vector3(0, deckY, z);
+  deck.material = unfogged(material(scene, 'bridge-deck-mat', new Color3(0.1, 0.1, 0.14), new Color3(0.08, 0.07, 0.12)));
+  const pylonX = -width * 0.08;
+  const pylonH = 20;
+  const pylonMat = unfogged(material(scene, 'bridge-pylon-mat', new Color3(0.15, 0.15, 0.2), new Color3(0.16, 0.14, 0.24)));
+  const pylon = MeshBuilder.CreateBox('bridge-pylon', { width: 0.9, height: pylonH, depth: 0.9 }, scene);
+  pylon.position = new Vector3(pylonX, y + pylonH / 2, z);
+  pylon.material = pylonMat;
+  for (let i = 0; i < 6; i++) {
+    const pier = MeshBuilder.CreateBox(`bridge-pier-${i}`, { width: 0.6, height: 3, depth: 0.6 }, scene);
+    pier.position = new Vector3(-width / 2 + (i + 0.5) * (width / 6), y + 1.5, z);
+    pier.material = pylonMat;
+  }
+  const top = new Vector3(pylonX, y + pylonH - 0.5, z);
+  const lines: Vector3[][] = [];
+  for (let i = 1; i <= 9; i++) {
+    for (const dir of [-1, 1]) {
+      lines.push([top.add(new Vector3(0, -i * 0.6, 0)), new Vector3(pylonX + dir * i * 2.6, deckY + 0.25, z)]);
+    }
+  }
+  const cables = MeshBuilder.CreateLineSystem('bridge-cables', { lines }, scene);
+  cables.color = new Color3(0.75, 0.9, 1);
+  cables.applyFog = false;
+  const lampMat = unfogged(material(scene, 'bridge-lamp-mat', Color3.Black(), new Color3(1, 0.8, 0.5)));
+  for (let i = 0; i < 24; i++) {
+    const lamp = MeshBuilder.CreateBox(`bridge-lamp-${i}`, { size: 0.22 }, scene);
+    lamp.position = new Vector3(-width / 2 + (i + 0.5) * (width / 24), deckY + 0.4, z - 0.8);
+    lamp.material = lampMat;
+  }
+  const tip = MeshBuilder.CreateSphere('bridge-tip', { diameter: 0.5 }, scene);
+  tip.position = new Vector3(pylonX, y + pylonH + 0.3, z);
+  tip.material = beaconMat;
+
+  return (t: number) => {
+    const on = Math.sin(t * 2.4) > 0.2 ? 1 : 0.15;
+    beaconMat.emissiveColor = new Color3(on, 0.1 * on, 0.15 * on);
+    waterMat.emissiveColor = new Color3(0.03, 0.05 + Math.sin(t * 0.8) * 0.01, 0.14);
+  };
+}
+
 export function buildVenue(scene: Scene, kind: string): VenueHandles {
   const glow = new GlowLayer('venue-glow', scene);
   glow.intensity = 0.55;
@@ -266,14 +354,14 @@ function exitDoor(scene: Scene, wallX: number, z: number): Portal {
   const frame = MeshBuilder.CreateBox('exit-door', { width: 0.1, height: 2.3, depth: 1.4 }, scene);
   frame.position = new Vector3(wallX + 0.06, 1.15, z);
   frame.material = material(scene, 'exit-door-mat', new Color3(0.05, 0.05, 0.08), new Color3(0.02, 0.35, 0.45));
-  const sign = makeLabel(scene, 'exit-sign', 'EXIT → CITY', { color: '#8defff', bg: 'none', width: 1.8, height: 0.45, billboard: false });
+  const sign = makeLabel(scene, 'exit-sign', 'EXIT → LEKKI', { color: '#8defff', bg: 'none', width: 1.8, height: 0.45, billboard: false });
   sign.position = new Vector3(wallX + 0.12, 2.65, z);
   sign.rotation.y = -Math.PI / 2;
   const marker = MeshBuilder.CreateDisc('exit-marker', { radius: 0.7, tessellation: 24 }, scene);
   marker.rotation.x = Math.PI / 2;
   marker.position = new Vector3(wallX + 1.0, 0.02, z);
   marker.material = material(scene, 'exit-marker-mat', Color3.Black(), new Color3(0.02, 0.3, 0.38));
-  return { kind: 'city', label: 'Back to the city', position: new Vector3(wallX + 1.0, 0, z) };
+  return { kind: 'city', label: 'Lekki Phase 1', position: new Vector3(wallX + 1.0, 0, z) };
 }
 
 function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueHandles {
@@ -339,7 +427,7 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
     }
   }
 
-  const venueDoor = (kind: string, label: string, color: string, x: number, z: number) => {
+  const venueDoor = (kind: string, signText: string, label: string, color: string, x: number, z: number) => {
     const side = Math.sign(x);
     const door = MeshBuilder.CreateBox(`door-${kind}`, { width: 0.12, height: 2.6, depth: 2 }, scene);
     door.position = new Vector3(x, 1.3, z);
@@ -350,7 +438,7 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
     mat.rotation.x = Math.PI / 2;
     mat.position = new Vector3(x - side * 1.3, 0.14, z);
     mat.material = material(scene, `door-marker-mat-${kind}`, Color3.Black(), new Color3(c[0] * 0.6, c[1] * 0.6, c[2] * 0.6));
-    const sign = makeLabel(scene, `sign-${kind}`, label, { color, bg: 'none', width: 4.2, height: 0.9, font: 64, billboard: false });
+    const sign = makeLabel(scene, `sign-${kind}`, signText, { color, bg: 'none', width: 4.2, height: 0.9, font: 64, billboard: false });
     sign.position = new Vector3(x - side * 0.05, 3.9, z);
     sign.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
     const light = new PointLight(`door-light-${kind}`, new Vector3(x - side * 1.5, 3, z), scene);
@@ -360,9 +448,15 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
     return { kind, label, position: new Vector3(x - side * 1.2, 0, z) };
   };
 
+  // The street ends at the lagoon: promenade wall, then the Lagos skyline and link bridge.
+  const promenade = MeshBuilder.CreateBox('promenade', { width: 18, height: 0.7, depth: 0.4 }, scene);
+  promenade.position = new Vector3(0, 0.35, 22);
+  promenade.material = material(scene, 'promenade-mat', new Color3(0.22, 0.2, 0.28), new Color3(0.05, 0.03, 0.08));
+  const skyline = addLagosSkyline(scene, { z: 40, y: -0.8, width: 140 });
+
   const portals: Portal[] = [
-    venueDoor('neon_lounge', 'NEON LOUNGE', '#ff2f91', -8.95, -3.6),
-    venueDoor('rooftop_party', 'ROOFTOP ↑', '#ffb02e', 8.95, 3.6),
+    venueDoor('neon_lounge', 'IKOYI LOUNGE', 'Ikoyi Lounge', '#ff2f91', -8.95, -3.6),
+    venueDoor('rooftop_party', 'VI ROOFTOP ↑', 'Victoria Island Rooftop', '#ffb02e', 8.95, 3.6),
   ];
 
   return {
@@ -371,6 +465,7 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
     portals,
     animate: (t) => {
       glow.intensity = 0.5 + Math.sin(t * 1.7) * 0.07;
+      skyline(t);
       signs.forEach(({ mat, base }, i) => {
         const flicker = 0.75 + Math.sin(t * (2 + (i % 3)) + i) * 0.25;
         mat.emissiveColor = base.scale(flicker);
@@ -462,8 +557,10 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
     m.alpha = 0.25;
     rail.material = m;
   }
+  const skyline = addLagosSkyline(scene, { z: 60, y: -14, width: 180 });
   for (let i = 0; i < 28; i++) {
     const angle = (i / 28) * Math.PI * 2;
+    if (Math.sin(angle) > 0.5) continue; // the lagoon side stays open
     const h = 3 + ((i * 7) % 9);
     const tower = MeshBuilder.CreateBox(`tower-${i}`, { width: 1.6, height: h, depth: 1.6 }, scene);
     tower.position = new Vector3(Math.cos(angle) * 22, h / 2 - 4, Math.sin(angle) * 22);
@@ -491,6 +588,7 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
     portals: [exit],
     animate: (t) => {
       glow.intensity = 0.5 + Math.sin(t * 1.5) * 0.06;
+      skyline(t);
       poolMat.emissiveColor = new Color3(0, 0.3 + Math.sin(t * 2) * 0.06, 0.5);
       bulbs.forEach((m, i) => { m.emissiveColor = new Color3(1, 0.65 + Math.sin(t * 3 + i) * 0.15, 0.3); });
     },

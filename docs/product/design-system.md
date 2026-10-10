@@ -55,6 +55,10 @@ Name-tag colour language in 3D: **you = pink `#ffc0df`**, **other players = cyan
 
 Desktop is the same shell with more room. Sheets slide in from the side instead of up from the bottom.
 
+Below 600px the top bar is exactly the two rows above (identity + ₦, then needs + time-only clock) and
+`--topbar-h` grows so badges/panels sit under it. Bottom of the world on phones: joystick bottom-left,
+quick-action dock bottom-right, interaction prompt centred above both.
+
 ## Universal screen states
 
 Every screen and component handles: **default, loading, empty, error, success, disabled, offline**.

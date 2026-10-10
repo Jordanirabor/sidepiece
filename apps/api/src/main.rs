@@ -1,6 +1,8 @@
 mod auth;
 mod chat;
 mod life;
+mod matching;
+mod messages;
 mod npcs;
 
 use axum::{
@@ -17,8 +19,8 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use sidepiece_common::{
     ApiOk, AuthTokenClaims, AuthVerifyResponse, AvatarConfig, DiscoverableProfile,
-    DiscoveryResponse, GameEvent, HealthResponse, IncomingPrivateRoomRequest,
-    IncomingRequestsResponse, InterestResult, InterestSnapshot, PlayerIntent, PlayerStateResponse,
+    DiscoveryResponse, GameEvent, HealthResponse, INVITATION_TYPES, IncomingPrivateRoomRequest,
+    IncomingRequestsResponse, InterestSnapshot, PlayerIntent, PlayerStateResponse,
     PrivateRoomResult, PrivateRoomSnapshot, RelationshipSnapshot, RoomDirectoryResponse,
     RoomJoinTicketResponse, RoomRecommendationResponse, RoomSummary, SafetyActionResult,
 };
@@ -125,7 +127,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/life/actions", get(life::list_actions))
         .route("/v1/world/clock", get(life::get_clock))
         .route("/v1/discovery", get(discovery))
-        .route("/v1/social/interest", post(express_interest))
+        .route("/v1/social/interest", post(matching::like))
+        .route("/v1/discover", get(matching::deck))
+        .route("/v1/social/pass", post(matching::pass))
+        .route("/v1/social/matches", get(matching::matches))
+        .route("/v1/social/matches/seen", post(matching::mark_seen))
+        .route("/v1/messages/inbox", get(messages::inbox))
+        .route("/v1/messages/thread", get(messages::thread))
+        .route("/v1/messages/send", post(messages::send))
+        .route("/v1/messages/read", post(messages::mark_read))
+        .route("/v1/messages/control", post(messages::control))
         .route("/v1/social/private-room", post(request_private_room))
         .route(
             "/v1/social/private-room/incoming",
@@ -368,7 +379,9 @@ async fn save_avatar(
     Json(req): Json<SaveAvatarRequest>,
 ) -> Result<Json<ApiOk<AvatarConfig>>, AppError> {
     require_player(&state, &headers, req.player_id)?;
-    let avatar_json = serde_json::to_value(&req.avatar)?;
+    let avatar =
+        sidepiece_common::validate_avatar(req.avatar).map_err(|e| AppError::bad_request(&e))?;
+    let avatar_json = serde_json::to_value(&avatar)?;
     sqlx::query("insert into avatars (player_id, config) values ($1, $2) on conflict (player_id) do update set config = excluded.config, updated_at = now()")
         .bind(req.player_id)
         .bind(avatar_json)
@@ -380,10 +393,10 @@ async fn save_avatar(
         Some(req.player_id),
         None,
         None,
-        serde_json::json!({ "display_name": req.avatar.display_name }),
+        serde_json::json!({ "display_name": avatar.display_name }),
     )
     .await;
-    Ok(Json(ApiOk::new(req.avatar)))
+    Ok(Json(ApiOk::new(avatar)))
 }
 
 async fn room_recommendation(
@@ -404,19 +417,19 @@ async fn room_recommendation(
     let (kind, reason) = match avatar.as_ref().map(|a| &a.intent) {
         Some(PlayerIntent::Flirt) | Some(PlayerIntent::CasualDating) => (
             "neon_lounge",
-            "Neon Lounge has the highest chemistry potential for flirting, first conversations, and casual discovery.",
+            "Ikoyi Lounge has the highest chemistry potential for flirting, first conversations, and casual discovery.",
         ),
         Some(PlayerIntent::Relationship) => (
             "rooftop_party",
-            "Rooftop Party is better for slower conversations, profile browsing, and relationship-minded encounters.",
+            "Victoria Island Rooftop is better for slower conversations, profile browsing, and relationship-minded encounters.",
         ),
         Some(PlayerIntent::Explore) => (
             "rooftop_party",
-            "Rooftop Party gives you a broader mix of people, scenes, and social options while you explore.",
+            "Victoria Island Rooftop gives you a broader mix of people, scenes, and social options while you explore.",
         ),
         _ => (
             "neon_lounge",
-            "Neon Lounge is the best starter venue for meeting people and learning the city flow.",
+            "Ikoyi Lounge is the best starter venue for meeting people and learning how Lagos nights flow.",
         ),
     };
 
@@ -591,6 +604,16 @@ mod tests {
     }
 
     #[test]
+    fn venues_use_lagos_names() {
+        assert_eq!(room_display_name("city"), "Lekki Phase 1");
+        assert_eq!(room_display_name("neon_lounge"), "Ikoyi Lounge");
+        assert_eq!(
+            room_display_name("rooftop_party"),
+            "Victoria Island Rooftop"
+        );
+    }
+
+    #[test]
     fn empty_venue_uses_first_instance() {
         assert_eq!(
             pick_instance(&rooms(&[0, 0, 0]), 50).as_deref(),
@@ -662,10 +685,10 @@ fn room_capacity(kind: &str) -> u32 {
 
 fn room_display_name(kind: &str) -> &'static str {
     match kind {
-        "rooftop_party" => "Rooftop Party",
-        "city" => "The City",
+        "rooftop_party" => "Victoria Island Rooftop",
+        "city" => "Lekki Phase 1",
         "private_room" => "Private Room",
-        _ => "Neon Lounge",
+        _ => "Ikoyi Lounge",
     }
 }
 
@@ -714,9 +737,11 @@ async fn discovery(
         .unwrap_or(&room_id)
         .to_string();
     let hidden = hidden_targets(&state, query.player_id).await?;
-    let likes = player_avatar(&state, query.player_id)
-        .await?
-        .map(|a| a.likes)
+    let me = player_avatar(&state, query.player_id).await?;
+    let likes = me.as_ref().map(|a| a.likes.clone()).unwrap_or_default();
+    let show_me = me
+        .as_ref()
+        .map(|a| a.preferences.show_me.clone())
         .unwrap_or_default();
     let location = room_display_name(&venue).to_string();
 
@@ -737,33 +762,29 @@ async fn discovery(
             if other_id == query.player_id || hidden.contains(&target) {
                 continue;
             }
-            let other = player_avatar(&state, other_id).await?;
-            let other_likes: Vec<&str> = other
-                .as_ref()
-                .map(|a| a.likes.iter().map(String::as_str).collect())
-                .unwrap_or_default();
-            profiles.push(DiscoverableProfile {
-                id: target,
+            let Some(other) = player_avatar(&state, other_id).await? else {
+                continue; // still in the creator
+            };
+            if let Some(me) = &me
+                && !sidepiece_common::visible_in_discovery(me, &other)
+            {
+                continue;
+            }
+            profiles.push(player_profile(
+                target,
                 display_name,
-                kind: "player".into(),
-                location: location.clone(),
-                looking_for: if other_likes.is_empty() {
-                    "Keeping it open".into()
-                } else {
-                    format!("Into: {}", other_likes.join(", "))
-                },
-                // Shared taste in partners is the closest signal we have between two players.
-                compatibility: npcs::compatibility(&likes, &other_likes),
-                social_rating: 7.5,
-                is_available: true,
-                npc: None,
-            });
+                location.clone(),
+                me.as_ref(),
+                &other,
+            ));
         }
     }
 
     for npc in npcs::for_venue(&venue) {
         let target = format!("npc:{}", npc.id);
-        if hidden.contains(&target) {
+        if hidden.contains(&target)
+            || (!show_me.is_empty() && !show_me.contains(&npc.look().gender))
+        {
             continue;
         }
         profiles.push(DiscoverableProfile {
@@ -776,6 +797,12 @@ async fn discovery(
             social_rating: npc.social_rating,
             is_available: true,
             npc: Some(npc.presence()),
+            bio: npc.tagline.into(),
+            interests: Vec::new(),
+            relationship_style: None,
+            open_to: INVITATION_TYPES.iter().map(|t| t.to_string()).collect(),
+            look: Some(npc.look()),
+            online: true,
         });
     }
 
@@ -783,42 +810,48 @@ async fn discovery(
     Ok(Json(ApiOk::new(DiscoveryResponse { room_id, profiles })))
 }
 
-#[derive(Deserialize)]
-struct InterestRequest {
-    player_id: Uuid,
-    target_id: String,
-    intent: String,
-}
-
-async fn express_interest(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Json(req): Json<InterestRequest>,
-) -> Result<Json<ApiOk<InterestResult>>, AppError> {
-    require_player(&state, &headers, req.player_id)?;
-    sqlx::query("insert into player_interests (id, player_id, target_id, intent) values ($1, $2, $3, $4) on conflict (player_id, target_id) do update set intent = excluded.intent")
-        .bind(Uuid::new_v4())
-        .bind(req.player_id)
-        .bind(&req.target_id)
-        .bind(&req.intent)
-        .execute(&state.db)
-        .await?;
-    publish_event(
-        &state,
-        "social.interest_expressed",
-        Some(req.player_id),
-        Some(req.target_id.clone()),
-        None,
-        serde_json::json!({ "intent": req.intent }),
-    )
-    .await;
-
-    Ok(Json(ApiOk::new(InterestResult {
-        player_id: req.player_id,
-        target_id: req.target_id,
-        intent: req.intent,
-        status: "interest_recorded".into(),
-    })))
+/// What another player may see of `other`: only fields they marked public.
+fn player_profile(
+    id: String,
+    display_name: String,
+    location: String,
+    me: Option<&AvatarConfig>,
+    other: &AvatarConfig,
+) -> DiscoverableProfile {
+    let p = &other.preferences;
+    DiscoverableProfile {
+        id,
+        display_name,
+        kind: "player".into(),
+        location,
+        looking_for: if other.likes.is_empty() {
+            "Keeping it open".into()
+        } else {
+            format!("Into: {}", other.likes.join(", "))
+        },
+        compatibility: match me {
+            Some(me) => sidepiece_common::player_compatibility(me, other),
+            None => 50,
+        },
+        social_rating: 7.5,
+        is_available: true,
+        npc: None,
+        bio: other.bio.clone(),
+        interests: if p.public_interests {
+            p.interests.clone()
+        } else {
+            Vec::new()
+        },
+        relationship_style: (p.public_relationship_style && !p.relationship_style.is_empty())
+            .then(|| p.relationship_style.clone()),
+        open_to: INVITATION_TYPES
+            .iter()
+            .filter(|t| !p.boundaries.iter().any(|b| b == *t))
+            .map(|t| t.to_string())
+            .collect(),
+        look: Some(other.look.clone()),
+        online: true,
+    }
 }
 
 #[derive(Deserialize)]
@@ -833,6 +866,22 @@ async fn request_private_room(
     Json(req): Json<PrivateRoomRequest>,
 ) -> Result<Json<ApiOk<PrivateRoomResult>>, AppError> {
     require_player(&state, &headers, req.player_id)?;
+    // Boundaries (spec Screen 04): never deliver an invitation type the target opted out of.
+    if let Some(target) = req
+        .target_id
+        .strip_prefix("player:")
+        .and_then(|id| Uuid::parse_str(id).ok())
+        && let Some(target_avatar) = player_avatar(&state, target).await?
+        && target_avatar
+            .preferences
+            .boundaries
+            .iter()
+            .any(|b| b == "private_location")
+    {
+        return Err(AppError::forbidden(
+            "they aren't open to private invitations",
+        ));
+    }
     let room_id = format!("private-{}", Uuid::new_v4());
     sqlx::query("insert into private_rooms (id, created_by, target_id, consent_state) values ($1, $2, $3, 'requested')")
         .bind(&room_id)

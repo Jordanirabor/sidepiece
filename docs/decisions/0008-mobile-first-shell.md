@@ -13,6 +13,6 @@
 
 **Consequences.**
 - `web/src/main.tsx` is split into routes/screens plus a component library (see `design-system.md`).
-- `scripts/ui-check.mjs` should screenshot both a phone viewport (390×844) and desktop.
+- `web/scripts/ui-check.mjs` should screenshot both a phone viewport (390×844) and desktop.
 
 **Revisit when.** Native clients exist and need a different navigation model.

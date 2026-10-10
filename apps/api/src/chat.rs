@@ -110,7 +110,7 @@ pub struct ChatRequest {
     pub message: String,
 }
 
-async fn load_stats(
+pub(crate) async fn load_stats(
     state: &SharedState,
     player_id: Uuid,
     target: &str,
@@ -356,7 +356,7 @@ fn system_prompt(npc: &npcs::Npc, profile: &PlayerProfile, stats: &RelationshipS
     let (_, tier) = relationship_tier(stats.affinity);
     format!(
         "You are {persona}\n\
-         You are in a 3D social game set in a nightlife city. Everyone in the game is an adult (18+).\n\
+         You are out in Lagos, Nigeria (Lekki, Ikoyi, Victoria Island nightlife; money is naira). Everyone in the game is an adult (18+).\n\
          You're chatting in person with a player called {name} (gender: {gender}; likes in a partner: {likes}).\n\
          Your current relationship with them: {tier} (affinity {aff}/100). Be warmer the closer you are.\n\n\
          Rules:\n\

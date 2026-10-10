@@ -14,7 +14,7 @@ Fill **every** field:
 - `venue` (an existing room kind), `x`, `z` (inside venue bounds, clear of spawn/doors)
 - `tagline`, `looking_for`, `social_rating`
 - `traits`: 1–3 values from `sidepiece_common::PARTNER_TRAITS` (Adventurous, Career-Focused, Caring, Humorous, Reserved). Compatibility = overlap with the player's likes.
-- `persona`: who they are, age (adult), job, vibe, what wins them over and what turns them off. Lagos-rooted once M2 lands.
+- `persona`: who they are, age (adult), job, vibe, what wins them over and what turns them off. Lagos-rooted (Lekki/Ikoyi/VI, Nigerian English, light Pidgin where natural). Keep skin tones in the deep-to-medium range; the cast is Black/African-forward.
 - `greeting`: their opening line. It is shown as the first message.
 - `warm` / `neutral` / `cold`: 3+ offline fallback replies each.
 - `look`: `AvatarLook`. Add any new `top`/`bottom`/`accessory` ids to `web/src/look.ts` catalogs.

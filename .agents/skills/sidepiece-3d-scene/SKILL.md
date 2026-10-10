@@ -35,7 +35,7 @@ The current humanoid is a **placeholder built from primitives**. Every `AvatarLo
 - `SceneView` picks the nearest NPC (≤ 2.2) or portal (≤ 2.64) as the target. E or a click on the prompt activates it.
 - The prompt is hidden while the NPC chat is open (CSS `:has`).
 - Keyboard input is ignored while an input is focused. Keys clear on window blur.
-- `window.__sp` is a read-only test hook (`pos()`, `portals`, `venue`) used by `scripts/ui-check.mjs`. Keep it working.
+- `window.__sp` is a read-only test hook (`pos()`, `portals`, `venue`) used by `web/scripts/ui-check.mjs`. Keep it working.
 
 ## Performance
 - The scene rebuilds on venue, look or NPC-set change. Dispose engines in effect cleanup.

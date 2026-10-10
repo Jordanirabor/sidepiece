@@ -54,13 +54,13 @@ pub const NPCS: &[Npc] = &[
         id: "maya",
         name: "Maya",
         venue: "neon_lounge",
-        tagline: "Neon regular · warm, teasing",
+        tagline: "Ikoyi Lounge regular · warm, teasing",
         looking_for: "Conversation, chemistry, and respectful flirting",
         social_rating: 8.4,
         x: -2.8,
         z: 3.6,
         traits: &["Caring", "Humorous"],
-        persona: "Maya, 27, a graphic designer and lounge regular. Warm, playful, quick to tease, allergic to cheesy pickup lines. Rewards curiosity, humour and respect; goes cold on pushiness, crude talk or negativity. Loves 90s R&B and late-night food spots.",
+        persona: "Maya, 27, a Lagos graphic designer who works out of a Yaba studio and is a regular at the Ikoyi Lounge. Warm, playful, quick to tease, allergic to cheesy pickup lines. Rewards curiosity, humour and respect; goes cold on pushiness, crude talk or negativity. Loves Afrobeats, old-school R&B and hunting down the best late-night suya in Lekki. Speaks natural Nigerian English and sometimes drops light Pidgin (\"abeg\", \"wahala\").",
         greeting: "Hey there! Seems like we're sharing this space — what brings you here tonight?",
         warm: &[
             "Okay, I like you already. Tell me more.",
@@ -80,7 +80,7 @@ pub const NPCS: &[Npc] = &[
         look: || {
             look(
                 "female",
-                0.45,
+                0.22,
                 "#1a0f0c",
                 0.85,
                 0.6,
@@ -95,14 +95,14 @@ pub const NPCS: &[Npc] = &[
         id: "dre",
         name: "Dre",
         venue: "neon_lounge",
-        tagline: "Bartender · knows everyone",
+        tagline: "Ikoyi Lounge bartender · knows everyone",
         looking_for: "Good company and people who tip in stories",
         social_rating: 7.9,
         x: 2.4,
         z: 4.6,
         traits: &["Humorous", "Reserved"],
-        persona: "Dre, 34, the lounge bartender. Dry humour, observant, protective of regulars, gives honest advice about who's who. Respects people who are genuine; unimpressed by bragging.",
-        greeting: "First time in here? I can tell. What are you drinking — and who are you hoping to run into?",
+        persona: "Dre, 34, head bartender at the Ikoyi Lounge, grew up in Surulere. Dry humour, observant, protective of regulars, gives honest advice about who's who in Lagos nightlife. Respects people who are genuine; unimpressed by big men flexing money they don't have. Mixes a serious Chapman.",
+        greeting: "First time in Ikoyi Lounge? I can tell. Chapman or something stronger — and who are you hoping to run into?",
         warm: &[
             "Ha. Alright, you're good people.",
             "Respect. First one's on me.",
@@ -117,7 +117,7 @@ pub const NPCS: &[Npc] = &[
         look: || {
             look(
                 "male",
-                0.2,
+                0.1,
                 "#0d0d0d",
                 0.05,
                 0.85,
@@ -132,14 +132,14 @@ pub const NPCS: &[Npc] = &[
         id: "zara",
         name: "Zara",
         venue: "rooftop_party",
-        tagline: "Creative director · slow burner",
+        tagline: "VI creative director · slow burner",
         looking_for: "Real conversation that might turn into something",
         social_rating: 8.8,
         x: -3.5,
         z: 4.5,
         traits: &["Career-Focused", "Reserved"],
-        persona: "Zara, 30, creative director. Thoughtful, ambitious, slow to warm up but deeply loyal once she does. Values depth, honesty and ambition; dislikes small talk and showing off.",
-        greeting: "Best view in the city and everyone's staring at their phones. What brings you up here?",
+        persona: "Zara, 30, creative director at a Victoria Island fashion agency. Thoughtful, ambitious, slow to warm up but deeply loyal once she does. Values depth, honesty and ambition; dislikes small talk, Lagos traffic excuses and showing off.",
+        greeting: "Best view of the lagoon in Lagos and everyone's staring at their phones. What brings you up here?",
         warm: &[
             "That's... actually a good answer.",
             "You're more interesting than the skyline. Barely.",
@@ -154,7 +154,7 @@ pub const NPCS: &[Npc] = &[
         look: || {
             look(
                 "female",
-                0.25,
+                0.3,
                 "#2b1a12",
                 0.6,
                 0.35,
@@ -169,13 +169,13 @@ pub const NPCS: &[Npc] = &[
         id: "kai",
         name: "Kai",
         venue: "rooftop_party",
-        tagline: "DJ · life of the party",
+        tagline: "VI Rooftop DJ · life of the party",
         looking_for: "Energy, laughs, no pressure",
         social_rating: 8.1,
         x: -4.0,
         z: 6.0,
         traits: &["Adventurous", "Humorous"],
-        persona: "Kai, 26, the rooftop DJ. High energy, spontaneous, loves dancing and dares. Rewards enthusiasm and spontaneity; bored by negativity and overthinking.",
+        persona: "Kai, 26, the Afrobeats and amapiano DJ at the Victoria Island Rooftop. High energy, spontaneous, loves dancing and dares. Rewards enthusiasm and spontaneity; bored by negativity and overthinking. Talks in quick Lagos slang.",
         greeting: "Yo! Request something or dance — standing still is illegal up here.",
         warm: &[
             "Ohhh, okay! I see you!",
@@ -191,7 +191,7 @@ pub const NPCS: &[Npc] = &[
         look: || {
             look(
                 "male",
-                0.55,
+                0.18,
                 "#c9a227",
                 0.2,
                 0.55,
