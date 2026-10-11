@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArcRotateCamera, Camera, Color3, Engine, Scene, Vector3 } from '@babylonjs/core';
-import { buildVenue, Humanoid, makeHumanoid, makeLabel, Portal } from './venue';
+import { applyCinematicLook, createEngine, disposeEngine } from './render';
+import { buildVenue, Humanoid, makeLabel, Portal } from './venue';
+import { makeAvatar } from './avatar3d';
 import { Look } from './look';
 
 export type Login = { player_id: string; display_name: string; token: string };
@@ -33,14 +35,18 @@ type Props = {
   typingNpcId?: string;
   onInteractNpc: (npcId: string) => void;
   onPortal: (kind: string) => void;
+  /** Stop rendering and input while a full-screen scene (a date) covers the world. The room stays joined. */
+  paused?: boolean;
   children?: React.ReactNode;
 };
 
-export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, onInteractNpc, onPortal, children }: Props) {
+export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, onInteractNpc, onPortal, paused = false, children }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const sceneRef = useRef<Scene | null>(null);
+  const engineRef = useRef<Engine | null>(null);
   const remotesRef = useRef<Map<string, Remote>>(new Map());
+  const castRef = useRef<(m: import('@babylonjs/core').AbstractMesh) => void>(() => {});
   const pendingLooksRef = useRef<Map<string, { look: Look; name: string }>>(new Map());
   const keysRef = useRef<Set<string>>(new Set());
   const moveVecRef = useRef<{ x: number; z: number }>({ x: 0, z: 0 });
@@ -51,6 +57,8 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
   const interactRef = useRef(onInteractNpc);
   const portalRef = useRef(onPortal);
   const typingRef = useRef<string | undefined>(typingNpcId);
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
   const [target, setTarget] = useState<Target | null>(null);
   const [chat, setChat] = useState<ChatLine[]>([]);
   const [draft, setDraft] = useState('');
@@ -75,19 +83,31 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
   const spawnRemote = (id: string, name: string, remoteLook: Look, pos: Vector3, rot: number) => {
     const scene = sceneRef.current;
     if (!scene || remotesRef.current.has(id)) return;
-    const h = makeHumanoid(scene, `remote-${id}`, remoteLook, new Color3(0, 0.8, 1), name, '#8defff');
+    const h = makeAvatar(scene, `remote-${id}`, remoteLook, new Color3(0, 0.8, 1), name, '#8defff', { castShadow: (m) => castRef.current(m) });
+    h.meshes.forEach((m) => castRef.current(m));
     h.root.position = pos.clone();
     h.root.rotation.y = rot;
     remotesRef.current.set(id, { h, target: pos.clone(), rot, name });
   };
 
+  // One engine for the canvas's lifetime; venue changes swap the scene only. Recreating engines on the same
+  // canvas left stale GL programs behind ("reading 'program'" on the first frame of the new venue).
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const engine = createEngine(canvasRef.current);
+    engineRef.current = engine;
+    return () => { engineRef.current = null; disposeEngine(engine); };
+  }, []);
+
   // Build the 3D venue. Rebuilt when venue type, avatar look, or NPC set changes.
   useEffect(() => {
     if (!canvasRef.current) return;
-    const engine = new Engine(canvasRef.current, true);
+    const engine = engineRef.current;
+    if (!engine) return;
     const scene = new Scene(engine);
     sceneRef.current = scene;
     const venue = buildVenue(scene, venueKind);
+    castRef.current = venue.castShadow;
 
     // Third-person, slightly over the shoulder, behind the player (player spawns facing +Z).
     const camera = new ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.25, 7.5, venue.playerSpawn.add(new Vector3(0, 1.2, 0)), scene);
@@ -97,21 +117,29 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
     camera.upperRadiusLimit = 18;
     camera.upperBetaLimit = Math.PI / 2.1;
     camera.lowerBetaLimit = Math.PI / 5;
+    camera.maxZ = 400;
+    applyCinematicLook(scene, [camera], venueKind === 'neon_lounge' ? { exposure: 1.4, bloomWeight: 0.4 } : {});
 
-    const local = makeHumanoid(scene, 'you', look, new Color3(1, 0.1, 0.55), player?.display_name ?? 'You', '#ffc0df');
+    const local = makeAvatar(scene, 'you', look, new Color3(1, 0.1, 0.55), player?.display_name ?? 'You', '#ffc0df', { castShadow: venue.castShadow });
     local.root.position = venue.playerSpawn.clone();
-    // Test/debug hook (read-only snapshot); used by automated UI checks.
-    (window as unknown as { __sp?: unknown }).__sp = { pos: () => local.root.position.asArray(), portals: venue.portals.map((p) => ({ kind: p.kind, pos: p.position.asArray() })), venue: venueKind };
+    local.meshes.forEach((m) => venue.castShadow(m));
+    // Test/debug hook used by automated UI checks (position, portals, venue; `scene` for readiness probes).
+    (window as unknown as { __sp?: unknown }).__sp = { scene, pos: () => local.root.position.asArray(), portals: venue.portals.map((p) => ({ kind: p.kind, pos: p.position.asArray() })), venue: venueKind };
 
     const npcActors = npcs.map((npc) => {
-      const h = makeHumanoid(scene, `npc-${npc.id}`, npc.look, new Color3(1, 0.05, 0.6), npc.name, '#ffe08a');
+      const actor = { bubbleY: 2.75 };
+      const h = makeAvatar(scene, `npc-${npc.id}`, npc.look, new Color3(1, 0.05, 0.6), npc.name, '#ffe08a', {
+        castShadow: venue.castShadow,
+        onReady: ({ headY }) => { actor.bubbleY = headY + 0.75; },
+      });
       h.root.position = new Vector3(npc.x, 0, npc.z);
+      h.meshes.forEach((m) => venue.castShadow(m));
       h.root.rotation.y = Math.PI;
       const bubble = makeLabel(scene, `npc-${npc.id}-typing`, '•••', { width: 0.6, height: 0.3, font: 64 });
       bubble.position.y = 2.75;
       bubble.parent = h.root;
       bubble.setEnabled(false);
-      return { npc, h, bubble };
+      return Object.assign(actor, { npc, h, bubble });
     });
 
     // Re-create remote avatars after a scene rebuild (e.g. look change) from the last known state.
@@ -137,6 +165,7 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
 
     let lastSent = 0;
     engine.runRenderLoop(() => {
+      if (pausedRef.current) { keysRef.current.clear(); return; }
       const dt = Math.min(engine.getDeltaTime() / 1000, 0.1);
       const t = performance.now() / 1000;
       venue.animate(t);
@@ -179,7 +208,7 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
       for (const actor of npcActors) {
         actor.h.ring.rotation.y += dt * 1.5;
         actor.bubble.setEnabled(typingRef.current === actor.npc.id);
-        if (typingRef.current === actor.npc.id) actor.bubble.position.y = 2.75 + Math.sin(t * 6) * 0.04;
+        if (typingRef.current === actor.npc.id) actor.bubble.position.y = actor.bubbleY + Math.sin(t * 6) * 0.04;
         const d = Vector3.Distance(local.root.position, actor.h.root.position);
         if (d < INTERACT_DISTANCE && (!closest || d < closest.d)) closest = { t: { type: 'npc', npc: actor.npc }, d };
         if (d < INTERACT_DISTANCE * 1.5) {
@@ -221,8 +250,9 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
       window.removeEventListener('resize', onResize);
       targetRef.current = null;
       setTarget(null);
+      castRef.current = () => {};
+      engine.stopRenderLoop();
       scene.dispose();
-      engine.dispose();
       sceneRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

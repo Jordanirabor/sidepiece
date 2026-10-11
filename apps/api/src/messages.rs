@@ -16,7 +16,8 @@ use chrono::{DateTime, Duration, Utc};
 use redis::AsyncCommands;
 use serde::Deserialize;
 use sidepiece_common::{
-    ApiOk, AvatarLook, ConversationView, DmMessageView, DmThreadResponse, InboxResponse,
+    ApiOk, AvatarLook, ConversationView, DmMessageView, DmThreadResponse, INVITATION_TYPES,
+    InboxResponse,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -55,7 +56,7 @@ pub struct ControlRequest {
     action: String,
 }
 
-fn parse_player_target(target_id: &str) -> Result<Uuid, AppError> {
+pub(crate) fn parse_player_target(target_id: &str) -> Result<Uuid, AppError> {
     target_id
         .strip_prefix("player:")
         .ok_or_else(|| AppError::bad_request("player conversation required"))
@@ -83,7 +84,7 @@ async fn presence(state: &SharedState, player_id: Uuid) -> Option<(String, Strin
     })
 }
 
-async fn player_name_look(
+pub(crate) async fn player_name_look(
     state: &SharedState,
     player_id: Uuid,
 ) -> Result<(String, Option<AvatarLook>), AppError> {
@@ -97,7 +98,7 @@ async fn player_name_look(
     Ok((display_name, look))
 }
 
-async fn ensure_visible_matched(
+pub(crate) async fn ensure_visible_matched(
     state: &SharedState,
     me: Uuid,
     other: Uuid,
@@ -167,6 +168,7 @@ pub async fn inbox(
 ) -> Result<Json<ApiOk<InboxResponse>>, AppError> {
     require_player(&state, &headers, q.player_id)?;
     let hidden = hidden_targets(&state, q.player_id).await?;
+    let pending = super::invites::pending_for(&state, q.player_id).await?;
     let rows = sqlx::query(
         "select target_id, created_at from matches where player_id = $1 order by created_at desc",
     )
@@ -206,6 +208,7 @@ pub async fn inbox(
                     venue: npc.venue.into(),
                     muted,
                     ended,
+                    pending_invite: None,
                 });
             }
             continue;
@@ -225,7 +228,8 @@ pub async fn inbox(
         .bind(&target_id)
         .fetch_optional(&state.db)
         .await?;
-        if ended_at.is_some_and(|t| t >= updated_at) {
+        let pending_invite = pending.get(&target_id).cloned();
+        if ended_at.is_some_and(|t| t >= updated_at) && pending_invite.is_none() {
             continue;
         }
         let unread_count: i64 = sqlx::query_scalar(
@@ -254,14 +258,29 @@ pub async fn inbox(
             venue: loc.map(|l| l.0).unwrap_or_default(),
             muted,
             ended,
+            pending_invite,
         });
     }
     conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let unread_count = conversations.iter().map(|c| c.unread_count).sum();
+    let unread_count = badge_unread(&conversations);
+    let invite_count = conversations
+        .iter()
+        .filter(|c| c.pending_invite.is_some())
+        .count() as i64;
     Ok(Json(ApiOk::new(InboxResponse {
         conversations,
         unread_count,
+        invite_count,
     })))
+}
+
+/// The nav badge total. Muting pauses alerts, so muted threads keep their own count but don't add to it.
+fn badge_unread(conversations: &[ConversationView]) -> i64 {
+    conversations
+        .iter()
+        .filter(|c| !c.muted)
+        .map(|c| c.unread_count)
+        .sum()
 }
 
 pub async fn thread(
@@ -314,7 +333,22 @@ pub async fn thread(
         muted,
         ended,
         messages,
+        open_to: open_to(&state, other).await?,
+        invitations: super::invites::between(&state, q.player_id, other).await?,
     })))
+}
+
+/// Invitation types this player is open to: everything not in their (private) boundaries list.
+async fn open_to(state: &SharedState, player_id: Uuid) -> Result<Vec<String>, AppError> {
+    let boundaries = player_avatar(state, player_id)
+        .await?
+        .map(|a| a.preferences.boundaries)
+        .unwrap_or_default();
+    Ok(INVITATION_TYPES
+        .iter()
+        .filter(|t| !boundaries.iter().any(|b| b == *t))
+        .map(|t| t.to_string())
+        .collect())
 }
 
 pub async fn send(
@@ -401,16 +435,17 @@ pub async fn control(
             ensure_visible_matched(&state, req.player_id, other).await?;
         }
     }
-    let (muted_until, ended_at) = match req.action.as_str() {
-        "mute" => (Some(Utc::now() + Duration::hours(8)), None),
-        "unmute" => (None, None),
-        "end" => (None, Some(Utc::now())),
+    // `set_mute` keeps End from silently unmuting: only mute/unmute touch muted_until.
+    let (set_mute, muted_until, ended_at) = match req.action.as_str() {
+        "mute" => (true, Some(Utc::now() + Duration::hours(8)), None),
+        "unmute" => (true, None, None),
+        "end" => (false, None, Some(Utc::now())),
         _ => return Err(AppError::bad_request("unknown conversation action")),
     };
     sqlx::query(
         "insert into conversation_state (player_id, target_id, muted_until, ended_at) values ($1, $2, $3, $4)
          on conflict (player_id, target_id) do update set
-           muted_until = excluded.muted_until,
+           muted_until = case when $5 then excluded.muted_until else conversation_state.muted_until end,
            ended_at = coalesce(excluded.ended_at, conversation_state.ended_at),
            updated_at = now()",
     )
@@ -418,6 +453,7 @@ pub async fn control(
     .bind(&req.target_id)
     .bind(muted_until)
     .bind(ended_at)
+    .bind(set_mute)
     .execute(&state.db)
     .await?;
     Ok(Json(ApiOk::new(
@@ -427,8 +463,37 @@ pub async fn control(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_player_target;
+    use super::{badge_unread, parse_player_target};
+    use chrono::Utc;
+    use sidepiece_common::ConversationView;
     use uuid::Uuid;
+
+    fn convo(unread_count: i64, muted: bool) -> ConversationView {
+        ConversationView {
+            target_id: format!("player:{}", Uuid::new_v4()),
+            display_name: "Tolu".into(),
+            kind: "player".into(),
+            look: None,
+            last_message: String::new(),
+            updated_at: Utc::now(),
+            unread_count,
+            online: false,
+            location: "Offline".into(),
+            venue: String::new(),
+            muted,
+            ended: false,
+            pending_invite: None,
+        }
+    }
+
+    #[test]
+    fn muted_threads_do_not_count_toward_badge() {
+        assert_eq!(
+            badge_unread(&[convo(2, false), convo(5, true), convo(1, false)]),
+            3
+        );
+        assert_eq!(badge_unread(&[]), 0);
+    }
 
     #[test]
     fn target_parser_is_strict() {

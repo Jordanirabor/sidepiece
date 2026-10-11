@@ -374,12 +374,18 @@ pub struct ConversationView {
     pub muted: bool,
     #[serde(default)]
     pub ended: bool,
+    /// Label of an incoming invitation still waiting for this player's answer.
+    #[serde(default)]
+    pub pending_invite: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxResponse {
     pub conversations: Vec<ConversationView>,
     pub unread_count: i64,
+    /// Incoming invitations waiting for an answer (adds to the nav badge).
+    #[serde(default)]
+    pub invite_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +401,109 @@ pub struct DmThreadResponse {
     pub muted: bool,
     pub ended: bool,
     pub messages: Vec<DmMessageView>,
+    /// Invitation types the other player accepts (same as the public `open_to` on their profile card).
+    #[serde(default)]
+    pub open_to: Vec<String>,
+    /// Activity invitations between the two players, oldest first (spec Screen 11, shown in-chat).
+    #[serde(default)]
+    pub invitations: Vec<InvitationView>,
+}
+
+/// An activity a player can propose (spec Screen 10). Ids double as boundary types (`INVITATION_TYPES`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub icon: String,
+    /// ₦ the sender pays, charged only when the invitation is accepted.
+    pub cost: i32,
+    /// Venue kind where it happens (`rooftop_party`, `neon_lounge`, `private_room`).
+    pub venue: String,
+}
+
+/// One invitation and its lifecycle: pending → accepted | declined | expired | cancelled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvitationView {
+    pub id: Uuid,
+    pub activity: String,
+    pub label: String,
+    pub icon: String,
+    pub cost: i32,
+    pub from_player_id: Uuid,
+    pub from_name: String,
+    pub target_id: String,
+    pub target_name: String,
+    /// True when the viewer sent it.
+    pub outgoing: bool,
+    pub status: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    /// Set once a date scene exists (accepted public date / venue visit).
+    #[serde(default)]
+    pub date_id: Option<Uuid>,
+    /// `active`, `completed` or `left` once a date exists.
+    #[serde(default)]
+    pub date_status: Option<String>,
+    /// Private room to enter (accepted private location).
+    #[serde(default)]
+    pub room_id: Option<String>,
+    /// Short explanation, e.g. why an NPC said not yet.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// One resolved beat of a date: what each side said and how the vibe moved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DateLine {
+    pub beat: i32,
+    pub prompt: String,
+    pub mine: String,
+    pub theirs: String,
+    pub delta: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DateOutcome {
+    pub label: String,
+    pub summary: String,
+    pub xp: i32,
+    pub affinity: i32,
+    pub objective_met: bool,
+}
+
+/// Date / shared scene state (spec Screen 12), from the viewer's side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DateView {
+    pub id: Uuid,
+    pub scene: String,
+    pub title: String,
+    /// Venue kind the stage is built from.
+    pub venue: String,
+    pub objective: String,
+    pub partner_id: String,
+    pub partner_name: String,
+    /// "player" or "npc".
+    pub partner_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner_look: Option<AvatarLook>,
+    /// Current beat, 0-based. Equals `beats_total` once finished.
+    pub beat: i32,
+    pub beats_total: i32,
+    pub prompt: String,
+    pub choices: Vec<String>,
+    pub my_choice: Option<i32>,
+    /// The partner has picked for the current beat (their line stays hidden until both have).
+    pub partner_ready: bool,
+    pub chemistry: i32,
+    pub chemistry_goal: i32,
+    pub history: Vec<DateLine>,
+    /// `active`, `completed` or `left`.
+    pub status: String,
+    pub left_by_me: bool,
+    pub partner_present: bool,
+    #[serde(default)]
+    pub outcome: Option<DateOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

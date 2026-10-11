@@ -1,4 +1,5 @@
 import {
+  AbstractMesh,
   Color3,
   DynamicTexture,
   GlowLayer,
@@ -12,6 +13,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import { ACCESSORIES, BOTTOMS, findItem, hexRgb, Look, skinRgb, TOPS } from './look';
+import { addFloorReflection, addKeyShadows, applySurface, contactShadow, quality } from './render';
 
 export type Portal = { kind: string; label: string; position: Vector3 };
 
@@ -20,13 +22,19 @@ export type VenueHandles = {
   playerSpawn: Vector3;
   portals: Portal[];
   animate: (t: number) => void;
+  /** Register a mesh as a shadow caster for the venue's key light (no-op on low quality). */
+  castShadow: (mesh: AbstractMesh) => void;
 };
+
+type VenueBuild = Omit<VenueHandles, 'castShadow'>;
 
 export function material(scene: Scene, name: string, color: Color3, emissive = Color3.Black()) {
   const mat = new StandardMaterial(name, scene);
   mat.diffuseColor = color;
   mat.emissiveColor = emissive;
   mat.specularColor = new Color3(0.12, 0.12, 0.12);
+  // Venues mix several neon point lights with the key light; the default of 4 drops some of them.
+  mat.maxSimultaneousLights = quality() === 'high' ? 12 : 6;
   return mat;
 }
 
@@ -59,7 +67,9 @@ export function makeLabel(scene: Scene, name: string, text: string, opts: { colo
   const mat = new StandardMaterial(`${name}-mat`, scene);
   mat.diffuseTexture = tex;
   mat.opacityTexture = tex;
-  mat.emissiveColor = Color3.White();
+  // Name tags stay crisp: just under the bloom threshold and out of the glow layer. Neon signs (bg 'none') still glow.
+  const neonSign = opts.bg === 'none';
+  mat.emissiveColor = neonSign ? Color3.White() : new Color3(0.82, 0.82, 0.82);
   mat.disableLighting = true;
   mat.backFaceCulling = false;
 
@@ -67,6 +77,7 @@ export function makeLabel(scene: Scene, name: string, text: string, opts: { colo
   plane.material = mat;
   plane.isPickable = false;
   if (opts.billboard !== false) plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
+  if (!neonSign) scene.effectLayers?.forEach((l) => { if (l instanceof GlowLayer) l.addExcludedMesh(plane); });
   return plane;
 }
 
@@ -80,12 +91,14 @@ export function makeHumanoid(scene: Scene, name: string, look: Look, accent: Col
   const nb = look.gender === 'non_binary';
   const width = 0.85 + look.body_type * 0.4;
   const skin = material(scene, `${name}-skin`, rgb(skinRgb(look.skin_tone)));
+  skin.specularColor = new Color3(0.28, 0.22, 0.2);
+  skin.specularPower = 28;
   const top = findItem(TOPS, look.top);
   const bottom = findItem(BOTTOMS, look.bottom);
   const topMat = material(scene, `${name}-top`, rgb(hexRgb(top.color)));
   const bottomMat = material(scene, `${name}-bottom`, rgb(hexRgb(bottom.color)));
   const hairMat = material(scene, `${name}-hair-mat`, rgb(hexRgb(look.hair_color)));
-  const parts: Mesh[] = [];
+  const parts: AbstractMesh[] = [];
   const add = <T extends Mesh>(m: T) => { m.parent = root; parts.push(m); return m; };
 
   // Legs (skin under skirts/dresses, cloth otherwise)
@@ -224,6 +237,9 @@ export function makeHumanoid(scene: Scene, name: string, look: Look, accent: Col
     }
   }
 
+  const shadow = contactShadow(scene, `${name}-contact`, 0.38 * width);
+  shadow.parent = root;
+
   const ring = MeshBuilder.CreateTorus(`${name}-ring`, { diameter: 0.9, thickness: 0.03, tessellation: 32 }, scene);
   ring.material = material(scene, `${name}-ring-mat`, Color3.Black(), accent);
   ring.position.y = 0.03;
@@ -245,7 +261,7 @@ export function makeHumanoid(scene: Scene, name: string, look: Look, accent: Col
     arms[1].rotation.x = swing * 0.8;
   };
 
-  return { root, ring, animateWalk };
+  return { root, ring, animateWalk, meshes: parts };
 }
 
 export type Humanoid = ReturnType<typeof makeHumanoid>;
@@ -268,7 +284,7 @@ export function addLagosSkyline(scene: Scene, opts: { z: number; y: number; widt
   // Skyline: deterministic towers with a few shared materials (lit floors read as emissive bands).
   const towerMats = [
     new Color3(0.08, 0.06, 0.2), new Color3(0.12, 0.07, 0.24), new Color3(0.05, 0.08, 0.2), new Color3(0.16, 0.08, 0.22),
-  ].map((e, i) => unfogged(material(scene, `skyline-mat-${i}`, new Color3(0.03, 0.03, 0.07), e)));
+  ].map((e, i) => unfogged(material(scene, `skyline-mat-${i}`, new Color3(0.03, 0.03, 0.07), e.scale(0.38))));
   const bandMat = unfogged(material(scene, 'skyline-band', Color3.Black(), new Color3(0.95, 0.72, 0.42)));
   const beaconMat = unfogged(material(scene, 'skyline-beacon', Color3.Black(), new Color3(1, 0.1, 0.15)));
   const beacons: Mesh[] = [];
@@ -338,15 +354,25 @@ export function addLagosSkyline(scene: Scene, opts: { z: number; y: number; widt
   };
 }
 
+/** Per-venue key light: direction, colour and strength of the shadow-casting light (ADR 0012). */
+const KEY_LIGHTS: Record<string, { direction: Vector3; intensity: number; color: Color3; area: number }> = {
+  city: { direction: new Vector3(0.35, -1, 0.45), intensity: 0.32, color: new Color3(0.62, 0.66, 1), area: 24 },
+  neon_lounge: { direction: new Vector3(-0.25, -1, 0.3), intensity: 0.28, color: new Color3(1, 0.62, 0.86), area: 12 },
+  rooftop_party: { direction: new Vector3(0, -0.7, 1), intensity: 0.45, color: new Color3(1, 0.62, 0.38), area: 14 },
+  private_room: { direction: new Vector3(0.2, -1, 0.25), intensity: 0.3, color: new Color3(1, 0.55, 0.5), area: 6 },
+};
+
 export function buildVenue(scene: Scene, kind: string): VenueHandles {
   const glow = new GlowLayer('venue-glow', scene);
   glow.intensity = 0.55;
   const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
 
-  if (kind === 'city') return buildCity(scene, glow, ambient);
-  if (kind === 'rooftop_party') return buildRooftop(scene, glow, ambient);
-  if (kind === 'private_room') return buildPrivateRoom(scene, glow, ambient);
-  return buildLounge(scene, glow, ambient);
+  const build = kind === 'city' ? buildCity(scene, glow, ambient)
+    : kind === 'rooftop_party' ? buildRooftop(scene, glow, ambient)
+    : kind === 'private_room' ? buildPrivateRoom(scene, glow, ambient)
+    : buildLounge(scene, glow, ambient);
+  const shadows = addKeyShadows(scene, KEY_LIGHTS[kind] ?? KEY_LIGHTS.neon_lounge);
+  return { ...build, castShadow: shadows.cast };
 }
 
 /** Exit door mounted on the left (-X) wall, facing into the room. */
@@ -364,9 +390,9 @@ function exitDoor(scene: Scene, wallX: number, z: number): Portal {
   return { kind: 'city', label: 'Lekki Phase 1', position: new Vector3(wallX + 1.0, 0, z) };
 }
 
-function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueHandles {
+function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
   scene.clearColor.set(0.06, 0.04, 0.14, 1);
-  ambient.intensity = 0.85;
+  ambient.intensity = 0.5;
   ambient.diffuse = new Color3(0.62, 0.58, 1);
   ambient.groundColor = new Color3(0.22, 0.12, 0.3);
   scene.fogMode = Scene.FOGMODE_EXP2;
@@ -378,28 +404,33 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
     for (let z = -16; z <= 16; z += 8) {
       const pole = MeshBuilder.CreateCylinder(`lamp-${side}-${z}`, { diameter: 0.09, height: 3.6 }, scene);
       pole.position = new Vector3(side * 6.3, 1.8, z + side * 2);
-      pole.material = material(scene, `lamp-mat-${side}-${z}`, new Color3(0.08, 0.08, 0.1));
+      const poleMat = material(scene, `lamp-mat-${side}-${z}`, new Color3(0.08, 0.08, 0.1));
+      poleMat.specularColor = new Color3(0.6, 0.6, 0.7);
+      poleMat.specularPower = 96;
+      pole.material = poleMat;
       const bulb = MeshBuilder.CreateSphere(`lamp-bulb-${side}-${z}`, { diameter: 0.32 }, scene);
       bulb.position = new Vector3(side * 6.3, 3.65, z + side * 2);
       bulb.material = material(scene, `lamp-bulb-mat-${side}-${z}`, Color3.Black(), new Color3(1, 0.85, 0.6));
       const light = new PointLight(`lamp-light-${side}-${z}`, bulb.position.clone(), scene);
       light.diffuse = new Color3(1, 0.82, 0.6);
-      light.intensity = 0.8;
-      light.range = 9;
+      light.intensity = 1.25;
+      light.range = 11;
     }
   }
 
   const street = MeshBuilder.CreateGround('street', { width: 12, height: 44 }, scene);
-  street.material = material(scene, 'street-mat', new Color3(0.16, 0.15, 0.2));
+  const streetMat = applySurface(material(scene, 'street-mat', new Color3(0.2, 0.19, 0.24)), 'asphalt', [3, 11], { gloss: 72, specular: 0.5 });
+  street.material = streetMat;
+  addFloorReflection(scene, street, streetMat, 0.9);
   for (const side of [-1, 1]) {
     const walk = MeshBuilder.CreateBox(`sidewalk-${side}`, { width: 3, height: 0.12, depth: 44 }, scene);
     walk.position = new Vector3(side * 7.5, 0.06, 0);
-    walk.material = material(scene, `sidewalk-mat-${side}`, new Color3(0.3, 0.28, 0.34));
+    walk.material = applySurface(material(scene, `sidewalk-mat-${side}`, new Color3(0.36, 0.34, 0.4)), 'concrete', [1, 11], { gloss: 24, specular: 0.15 });
   }
   for (let z = -20; z <= 20; z += 4) {
     const dash = MeshBuilder.CreateBox(`dash-${z}`, { width: 0.12, height: 0.01, depth: 1.6 }, scene);
     dash.position = new Vector3(0, 0.01, z);
-    dash.material = material(scene, `dash-mat-${z}`, Color3.Black(), new Color3(0.6, 0.55, 0.3));
+    dash.material = material(scene, `dash-mat-${z}`, Color3.Black(), new Color3(0.42, 0.38, 0.2));
   }
 
   const signs: { mat: StandardMaterial; base: Color3 }[] = [];
@@ -409,7 +440,7 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
       const h = 8 + ((i * 5 + (side > 0 ? 3 : 0)) % 9);
       const b = MeshBuilder.CreateBox(`bldg-${side}-${i}`, { width: 5, height: h, depth: 6.5 }, scene);
       b.position = new Vector3(side * 11.5, h / 2, -18 + i * 7.2);
-      b.material = material(scene, `bldg-mat-${side}-${i}`, new Color3(0.16, 0.13, 0.26), new Color3(0.04, 0.03, 0.08));
+      b.material = applySurface(material(scene, `bldg-mat-${side}-${i}`, new Color3(0.2, 0.17, 0.3), new Color3(0.03, 0.02, 0.06)), 'plaster', [2, Math.ceil(h / 3)], { gloss: 16, specular: 0.08 });
       // lit windows
       for (let r = 0; r < Math.floor(h / 2.2); r++) {
         const win = MeshBuilder.CreatePlane(`win-${side}-${i}-${r}`, { width: 3.6, height: 0.5 }, scene);
@@ -474,9 +505,9 @@ function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): Ve
   };
 }
 
-function buildLounge(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueHandles {
+function buildLounge(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
   scene.clearColor.set(0.02, 0.02, 0.05, 1);
-  ambient.intensity = 0.55;
+  ambient.intensity = 0.6;
   ambient.groundColor = new Color3(0.12, 0.06, 0.16);
   const pink = new PointLight('pink', new Vector3(-4, 5, -2), scene);
   pink.diffuse = new Color3(1, 0.1, 0.55);
@@ -488,17 +519,19 @@ function buildLounge(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): 
   cyan.range = 16;
 
   const floor = MeshBuilder.CreateGround('floor', { width: 16, height: 16 }, scene);
-  floor.material = material(scene, 'floor-mat', new Color3(0.035, 0.035, 0.08));
+  const floorMat = applySurface(material(scene, 'floor-mat', new Color3(0.17, 0.15, 0.24)), 'tile', [4, 4], { gloss: 96, specular: 0.6 });
+  floor.material = floorMat;
+  addFloorReflection(scene, floor, floorMat, 0.8);
   const back = MeshBuilder.CreateBox('back-wall', { width: 16, height: 4, depth: 0.12 }, scene);
   back.position = new Vector3(0, 2, 7.9);
-  back.material = material(scene, 'back-mat', new Color3(0.07, 0.04, 0.14));
+  back.material = applySurface(material(scene, 'back-mat', new Color3(0.11, 0.07, 0.2)), 'plaster', [4, 1]);
   const left = MeshBuilder.CreateBox('left-wall', { width: 0.12, height: 4, depth: 16 }, scene);
   left.position = new Vector3(-7.9, 2, 0);
-  left.material = material(scene, 'left-mat', new Color3(0.045, 0.04, 0.11));
+  left.material = applySurface(material(scene, 'left-mat', new Color3(0.08, 0.07, 0.16)), 'plaster', [4, 1]);
 
   const bar = MeshBuilder.CreateBox('bar', { width: 5.8, height: 1.05, depth: 0.95 }, scene);
   bar.position = new Vector3(0, 0.53, 5.4);
-  bar.material = material(scene, 'bar-mat', new Color3(0.15, 0.08, 0.3));
+  bar.material = applySurface(material(scene, 'bar-mat', new Color3(0.28, 0.16, 0.42)), 'wood', [2, 1], { gloss: 80, specular: 0.4 });
   const barTop = MeshBuilder.CreateBox('bar-top', { width: 6, height: 0.06, depth: 1.08 }, scene);
   barTop.position = new Vector3(0, 1.09, 5.4);
   const barTopMat = material(scene, 'bar-top-mat', new Color3(0.05, 0.02, 0.08), new Color3(1, 0.05, 0.42));
@@ -533,9 +566,9 @@ function buildLounge(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): 
   };
 }
 
-function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueHandles {
-  scene.clearColor.set(0.06, 0.03, 0.12, 1);
-  ambient.intensity = 0.7;
+function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
+  scene.clearColor.set(0.03, 0.015, 0.07, 1);
+  ambient.intensity = 0.38;
   ambient.diffuse = new Color3(0.75, 0.6, 1);
   ambient.groundColor = new Color3(0.25, 0.15, 0.2);
   const sunset = new PointLight('sunset', new Vector3(0, 6, 9), scene);
@@ -544,7 +577,9 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
   sunset.range = 30;
 
   const deck = MeshBuilder.CreateGround('deck', { width: 18, height: 18 }, scene);
-  deck.material = material(scene, 'deck-mat', new Color3(0.16, 0.11, 0.09));
+  const deckMat = applySurface(material(scene, 'deck-mat', new Color3(0.36, 0.26, 0.2)), 'wood', [6, 6], { gloss: 40, specular: 0.25 });
+  deck.material = deckMat;
+  addFloorReflection(scene, deck, deckMat, 0.25);
   const pool = MeshBuilder.CreateBox('pool', { width: 5, height: 0.08, depth: 3 }, scene);
   pool.position = new Vector3(3.5, 0.04, 2.5);
   const poolMat = material(scene, 'pool-mat', new Color3(0, 0.3, 0.4), new Color3(0, 0.35, 0.5));
@@ -554,7 +589,9 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
     const rail = MeshBuilder.CreateBox(`rail-${x}-${z}`, { width: w, height: 1, depth: d }, scene);
     rail.position = new Vector3(x, 0.5, z);
     const m = material(scene, `rail-mat-${x}-${z}`, new Color3(0.4, 0.5, 0.7));
-    m.alpha = 0.25;
+    m.alpha = 0.1;
+    m.specularColor = new Color3(0.9, 0.9, 1);
+    m.specularPower = 128;
     rail.material = m;
   }
   const skyline = addLagosSkyline(scene, { z: 60, y: -14, width: 180 });
@@ -564,7 +601,7 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
     const h = 3 + ((i * 7) % 9);
     const tower = MeshBuilder.CreateBox(`tower-${i}`, { width: 1.6, height: h, depth: 1.6 }, scene);
     tower.position = new Vector3(Math.cos(angle) * 22, h / 2 - 4, Math.sin(angle) * 22);
-    tower.material = material(scene, `tower-mat-${i}`, new Color3(0.05, 0.05, 0.12), new Color3(0.05, 0.04 + (i % 3) * 0.04, 0.14));
+    tower.material = material(scene, `tower-mat-${i}`, new Color3(0.05, 0.05, 0.12), new Color3(0.02, 0.015 + (i % 3) * 0.015, 0.05));
   }
   const bulbs: StandardMaterial[] = [];
   for (let i = 0; i < 16; i++) {
@@ -577,6 +614,8 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
   const dj = MeshBuilder.CreateBox('dj', { width: 3, height: 1, depth: 1 }, scene);
   dj.position = new Vector3(-4, 0.5, 6.5);
   dj.material = material(scene, 'dj-mat', new Color3(0.1, 0.05, 0.15), new Color3(0.5, 0.1, 0.8));
+  poolMat.specularColor = new Color3(0.9, 0.95, 1);
+  poolMat.specularPower = 128;
   const wall = MeshBuilder.CreateBox('stair-wall', { width: 0.2, height: 3, depth: 3 }, scene);
   wall.position = new Vector3(-8.95, 1.5, -5);
   wall.material = material(scene, 'stair-wall-mat', new Color3(0.12, 0.1, 0.16));
@@ -595,7 +634,7 @@ function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight):
   };
 }
 
-function buildPrivateRoom(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueHandles {
+function buildPrivateRoom(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
   scene.clearColor.set(0.04, 0.01, 0.03, 1);
   ambient.intensity = 0.45;
   ambient.groundColor = new Color3(0.15, 0.05, 0.08);
@@ -605,15 +644,17 @@ function buildPrivateRoom(scene: Scene, glow: GlowLayer, ambient: HemisphericLig
   warm.range = 9;
 
   const floor = MeshBuilder.CreateGround('floor', { width: 8, height: 8 }, scene);
-  floor.material = material(scene, 'floor-mat', new Color3(0.12, 0.04, 0.06));
+  const floorMat = applySurface(material(scene, 'floor-mat', new Color3(0.3, 0.16, 0.14)), 'wood', [3, 3], { gloss: 64, specular: 0.3 });
+  floor.material = floorMat;
+  addFloorReflection(scene, floor, floorMat, 0.35);
   for (const [x, z, w, d] of [[0, 4, 8, 0.1], [0, -4, 8, 0.1], [4, 0, 0.1, 8], [-4, 0, 0.1, 8]] as const) {
     const wall = MeshBuilder.CreateBox(`wall-${x}-${z}`, { width: w, height: 3, depth: d }, scene);
     wall.position = new Vector3(x, 1.5, z);
-    wall.material = material(scene, `wall-mat-${x}-${z}`, new Color3(0.18, 0.05, 0.1));
+    wall.material = applySurface(material(scene, `wall-mat-${x}-${z}`, new Color3(0.26, 0.08, 0.14)), 'plaster', [3, 1]);
   }
   const couch = MeshBuilder.CreateBox('couch', { width: 3, height: 0.5, depth: 1 }, scene);
   couch.position = new Vector3(0, 0.25, 3.2);
-  couch.material = material(scene, 'couch-mat', new Color3(0.45, 0.05, 0.15));
+  couch.material = applySurface(material(scene, 'couch-mat', new Color3(0.55, 0.08, 0.2)), 'fabric', [4, 1], { gloss: 12, specular: 0.05 });
   const back = MeshBuilder.CreateBox('couch-back', { width: 3, height: 0.7, depth: 0.25 }, scene);
   back.position = new Vector3(0, 0.75, 3.6);
   back.material = couch.material;

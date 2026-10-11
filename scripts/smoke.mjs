@@ -1,4 +1,4 @@
-const API = process.env.API_URL ?? 'http://localhost:4000';
+const API = process.env.API_URL ?? 'http://localhost:4002';
 const log = (...a) => console.log(...a);
 async function call(method, path, token, body) {
   const r = await fetch(API + path, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined });
@@ -104,10 +104,13 @@ check(!bInboxEnded.conversations.some(c => c.target_id === `player:${A.player_id
 must(await call('POST', '/v1/messages/send', A.token, { player_id: A.player_id, target_id: `player:${B.player_id}`, message: 'Still around?' }), 'send after end');
 const bInboxNew = must(await call('GET', `/v1/messages/inbox?player_id=${B.player_id}`, B.token), 'B inbox new after end');
 check(bInboxNew.conversations.some(c => c.target_id === `player:${A.player_id}` && c.unread_count === 1), 'new message reopens ended conversation');
+const reopened = bInboxNew.conversations.find(c => c.target_id === `player:${A.player_id}`);
+const unmutedUnread = bInboxNew.conversations.filter(c => !c.muted).reduce((n, c) => n + c.unread_count, 0);
+check(reopened?.muted === true && bInboxNew.unread_count === unmutedUnread, 'muted thread keeps its unread count but stays out of the badge total');
 const D = await makePlayer('Dee' + Date.now() % 1000, ['Caring'], 'tee_black');
 const unmatched = await call('POST', '/v1/messages/send', A.token, { player_id: A.player_id, target_id: `player:${D.player_id}`, message: 'hello' });
 check(unmatched.status === 403, `unmatched players cannot message (got ${unmatched.status})`);
-log('messages ok: persisted DM, unread/read, mute/end, unmatched blocked');
+log('messages ok: persisted DM, unread/read, mute (badge) / end, unmatched blocked');
 
 // Ticket reuse must fail
 const t1 = must(await call('POST', '/v1/rooms/join-ticket', A.token, { player_id: A.player_id, room_id: roomA.id }), 'ticket');
@@ -131,6 +134,93 @@ check(actions.find(x => x.id === 'work_shift').label.includes('₦18,000'), 'shi
 log('economy ok: start ₦50,000, drink ₦3,500, labels in ₦');
 const wrongPlace = await call('POST', `/v1/player/${A.player_id}/life/action`, A.token, { action: 'work_shift', venue: 'neon_lounge' });
 log('work shift in lounge ->', wrongPlace.status, wrongPlace.error);
+
+// ---- M6: Invitations & date scenes ----
+const acts = must(await call('GET', '/v1/activities'), 'activities');
+check(['public_date', 'venue_visit', 'private_location'].every(id => acts.some(x => x.id === id && x.cost > 0 && x.description)), 'activity catalog covers all three invitation types with costs');
+const cashOf = async (p) => must(await call('GET', `/v1/player/${p.player_id}/life`, p.token), 'life');
+const invite = (from, to, activity, extra = {}) => call('POST', '/v1/invitations', from.token, { player_id: from.player_id, target_id: `player:${to.player_id}`, activity, ...extra });
+const respond = (p, inv, action) => call('POST', `/v1/invitations/${inv.id}/respond`, p.token, { player_id: p.player_id, action });
+const threadOf = async (p, other) => must(await call('GET', `/v1/messages/thread?player_id=${p.player_id}&target_id=player:${other.player_id}`, p.token), 'thread');
+const S = await makePlayer('Sol' + Date.now() % 1000, ['Caring'], 'tee_black');
+check((await invite(A, S, 'public_date')).status === 403, 'unmatched players cannot invite');
+check((await invite(A, B, 'yacht_party')).status === 400, 'unknown activity -> 400');
+const aCash0 = (await cashOf(A)).money;
+const inv1 = must(await invite(A, B, 'public_date'), 'A invites B');
+check(inv1.status === 'pending' && inv1.outgoing && inv1.label === 'Rooftop date', 'invitation starts pending');
+check((await invite(A, B, 'venue_visit')).status === 409, 'only one pending invitation per pair');
+const bInboxInv = must(await call('GET', `/v1/messages/inbox?player_id=${B.player_id}`, B.token), 'B inbox invite');
+check(bInboxInv.conversations.find(c => c.target_id === `player:${A.player_id}`)?.pending_invite === 'Rooftop date' && bInboxInv.invite_count >= 1, 'recipient inbox flags the pending invitation');
+const bSees = (await threadOf(B, A)).invitations.at(-1);
+check(bSees.id === inv1.id && !bSees.outgoing && bSees.status === 'pending', 'invitation card shows in the recipient thread');
+check((await respond(A, inv1, 'accept')).status === 403, 'sender cannot accept their own invitation');
+check((await respond(B, inv1, 'cancel')).status === 403, 'recipient cannot cancel (they decline)');
+check((await respond(S, inv1, 'accept')).status === 404, 'a third party cannot see the invitation');
+const dec = must(await respond(B, inv1, 'decline'), 'B declines');
+check(dec.status === 'declined', 'decline -> declined');
+check((await cashOf(A)).money === aCash0, 'a declined invitation costs nothing');
+check((await respond(B, inv1, 'accept')).status === 409, 'a declined invitation cannot be accepted later');
+check((await invite(A, B, 'venue_visit')).status === 409, 'decline cooldown: no re-asking straight away');
+must(await call('POST', '/v1/messages/send', A.token, { player_id: A.player_id, target_id: `player:${B.player_id}`, message: 'No worries! Still up for chatting.' }), 'chat after decline');
+const inv2 = must(await invite(B, A, 'venue_visit'), 'B invites A');
+check(must(await respond(B, inv2, 'cancel'), 'B cancels').status === 'cancelled', 'cancel -> cancelled');
+check((await respond(A, inv2, 'accept')).status === 409, 'a cancelled invitation cannot be accepted');
+const inv3 = must(await invite(B, A, 'venue_visit', { ttl_seconds: 1 }), 'B invites A (short ttl)');
+await sleep(1500);
+check((await threadOf(A, B)).invitations.find(i => i.id === inv3.id)?.status === 'expired', 'pending invitation expires');
+check((await respond(A, inv3, 'accept')).status === 409, 'an expired invitation cannot be accepted');
+log('invitations ok: pending, one-per-pair, decline (free, cooldown, chat continues), cancel, expire, only the right side can answer');
+
+const bCash0 = (await cashOf(B)).money;
+const inv4 = must(await invite(B, A, 'public_date'), 'B invites A to a date');
+const acc = must(await respond(A, inv4, 'accept'), 'A accepts');
+check(acc.status === 'accepted' && acc.date_id === inv4.id && acc.date_status === 'active', 'accept starts the date scene');
+check((await cashOf(B)).money === bCash0 - inv4.cost, `sender pays ${inv4.cost} on acceptance`);
+check((await respond(A, inv4, 'accept')).status === 409, 'accepting twice does nothing');
+const dateUrl = `/v1/dates/${inv4.id}`;
+const getDate = async (p) => must(await call('GET', `${dateUrl}?player_id=${p.player_id}`, p.token), 'date');
+const choose = (p, beat, choice) => call('POST', `${dateUrl}/choose`, p.token, { player_id: p.player_id, beat, choice });
+check((await call('GET', `${dateUrl}?player_id=${S.player_id}`, S.token)).status === 404, 'outsiders cannot open the date');
+const d0 = await getDate(A);
+check(d0.beat === 0 && d0.choices.length === 3 && d0.partner_name === B.display_name && d0.title === 'Rooftop date', 'date opens on beat 1 with three choices');
+const aXp0 = (await cashOf(A)).xp; const bXp0 = (await cashOf(B)).xp;
+must(await choose(A, 0, 0), 'A picks');
+check((await choose(A, 0, 1)).status === 409, 'one choice per beat');
+check((await choose(A, 1, 0)).status === 409, 'cannot skip ahead');
+check((await choose(B, 0, 7)).status === 400, 'invalid choice -> 400');
+const bWait = await getDate(B);
+check(bWait.partner_ready && bWait.my_choice == null && bWait.beat === 0, 'partner choice is hidden until both pick');
+const d1 = must(await choose(B, 0, 1), 'B picks');
+check(d1.beat === 1 && d1.history.length === 1 && d1.history[0].delta === 4 && d1.chemistry === 4, 'beat resolves when both pick');
+for (const beat of [1, 2]) { must(await choose(A, beat, 0), 'A picks'); must(await choose(B, beat, 0), 'B picks'); }
+const done = await getDate(A);
+check(done.status === 'completed' && done.outcome?.label === 'Sparks flew' && done.outcome.objective_met, `date completes with an outcome (${done.outcome?.label}, chemistry ${done.chemistry}/${done.chemistry_goal})`);
+check((await cashOf(A)).xp === aXp0 + done.outcome.xp && (await cashOf(B)).xp === bXp0 + done.outcome.xp, 'both get the date XP exactly once');
+check((await choose(A, 3, 0)).status === 409, 'no choices after the date ends');
+must(await call('POST', `${dateUrl}/leave`, A.token, { player_id: A.player_id }), 'leave after done');
+check((await getDate(A)).status === 'completed', 'leaving a finished date keeps it completed');
+
+const inv5 = must(await invite(B, A, 'venue_visit'), 'B invites A to the lounge');
+must(await respond(A, inv5, 'accept'), 'A accepts lounge');
+must(await call('POST', `/v1/dates/${inv5.id}/leave`, A.token, { player_id: A.player_id }), 'A leaves');
+const bLeft = must(await call('GET', `/v1/dates/${inv5.id}?player_id=${B.player_id}`, B.token), 'B sees left');
+check(bLeft.status === 'left' && !bLeft.left_by_me && bLeft.title === 'Lounge night', 'partner sees the date ended neutrally');
+check((await call('POST', `/v1/dates/${inv5.id}/choose`, B.token, { player_id: B.player_id, beat: 0, choice: 0 })).status === 409, 'no choices after someone leaves');
+log(`dates ok: accept -> scene, sender charged, hidden picks, beats resolve, ${done.outcome.label} (+${done.outcome.xp} XP once), leave ends it for both`);
+
+const inv6 = must(await invite(B, A, 'private_location'), 'B invites A somewhere private');
+const acc6 = must(await respond(A, inv6, 'accept'), 'A accepts private');
+check(acc6.room_id?.startsWith('private-'), 'private location opens a private room');
+must(await call('POST', '/v1/rooms/join-ticket', A.token, { player_id: A.player_id, room_id: acc6.room_id }), 'A ticket to private room');
+check((await call('POST', '/v1/rooms/join-ticket', S.token, { player_id: S.player_id, room_id: acc6.room_id })).status === 403, 'outsiders cannot enter the private room');
+const npcInv = must(await call('POST', '/v1/invitations', A.token, { player_id: A.player_id, target_id: 'npc:zara', activity: 'public_date' }), 'invite Zara');
+check(npcInv.status === 'declined' && npcInv.note?.includes('Keep talking'), `an NPC you barely know says not yet (${npcInv.note})`);
+const E = await makePlayer('Ema' + Date.now() % 1000, ['Caring'], 'tee_black', { preferences: { boundaries: ['public_date'] } });
+must(await call('POST', '/v1/social/interest', A.token, { player_id: A.player_id, target_id: `player:${E.player_id}` }), 'A likes E');
+must(await call('POST', '/v1/social/interest', E.token, { player_id: E.player_id, target_id: `player:${A.player_id}` }), 'E likes A');
+check((await invite(A, E, 'public_date')).status === 403, 'boundaries block that invitation type');
+check(must(await invite(A, E, 'venue_visit'), 'other types still allowed').status === 'pending', 'other invitation types still go through');
+log('private + npc ok: private room on accept, outsiders kept out, NPC consent follows the relationship');
 
 // Player-to-player private room: A invites B
 const pr = must(await call('POST', '/v1/social/private-room', A.token, { player_id: A.player_id, target_id: `player:${B.player_id}` }), 'request');
@@ -162,6 +252,8 @@ const aMatches3 = must(await call('GET', `/v1/social/matches?player_id=${A.playe
 check(!aMatches3.some(m => m.target_id === `player:${B.player_id}`), 'a block hides the match');
 const blockedDm = await call('POST', '/v1/messages/send', A.token, { player_id: A.player_id, target_id: `player:${B.player_id}`, message: 'are you there?' });
 check(blockedDm.status === 404, `blocked players cannot DM (got ${blockedDm.status})`);
+check((await invite(A, B, 'venue_visit')).status === 404, 'blocked players cannot invite');
+check((await call('GET', `/v1/dates/${inv4.id}?player_id=${A.player_id}`, A.token)).status === 404, 'a block hides shared dates too');
 
 const bad = await call('GET', `/v1/npc/nobody/chat?player_id=${A.player_id}`, A.token);
 log('unknown npc ->', bad.status, bad.error);

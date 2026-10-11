@@ -1,12 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArcRotateCamera, Color3, Engine, HemisphericLight, PointLight, Scene, Vector3 } from '@babylonjs/core';
-import { makeHumanoid } from './venue';
+import { ArcRotateCamera, Color3, DirectionalLight, HemisphericLight, PointLight, Scene, Vector3 } from '@babylonjs/core';
+import { applyCinematicLook, createEngine, disposeEngine } from './render';
+import { makeAvatar } from './avatar3d';
 import { ACCESSORIES, BOTTOMS, HAIR_COLORS, Item, Look, matchCode, PARTNER_TRAITS, randomLook, STYLES, TOPS, findItem } from './look';
+import { ArrowLeft, ArrowRight, AtSign, Check, HeartHandshake, PencilLine, Shirt, Sparkles, UserRound, type LucideIcon } from 'lucide-react';
+import { Field } from './ui';
 import { INTENTS, INTERESTS, INVITATION_TYPES, labelOf, MAX_BIO_CHARS, MAX_INTERESTS, Preferences, RELATIONSHIP_STYLES, SHOW_ME } from './prefs';
 
 export type Identity = { alias: string; gender: string; likes: string[]; look: Look; match_code: string; bio: string; intent: string; preferences: Preferences };
 
 const STEPS = 5;
+const STEP_NAMES = ['You', 'Look', 'Outfit', 'Vibe', 'Ready'];
+/** Final-review checklist: each tile jumps back to the step it covers. */
+const CHECKLIST: { label: string; step: number; Icon: LucideIcon }[] = [
+  { label: 'Name', step: 1, Icon: UserRound },
+  { label: 'Looks', step: 2, Icon: Sparkles },
+  { label: 'Outfit', step: 3, Icon: Shirt },
+  { label: 'Vibe', step: 4, Icon: HeartHandshake },
+];
 
 function Toggle({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return <label className="switch-row">
@@ -22,40 +33,80 @@ const GENDERS = [
 ];
 
 /**
- * 3D portrait of an avatar look (creator, profile cards, match moment). Rebuilt on change, which is cheap
- * for primitive avatars. `interactive=false` leaves pointer input to the page (e.g. swipeable cards).
+ * 3D portrait of an avatar look (creator, profile cards, match moment). One engine per canvas for its whole
+ * life; a look change only swaps the character. Browsers cap live WebGL contexts (~16), so rebuilding the
+ * engine per change evicted contexts mid-load. `interactive=false` leaves pointer input to the page.
  */
 export function Preview({ look, framing, interactive = true }: { look: Look; framing: 'face' | 'full'; interactive?: boolean }) {
   const ref = useRef<HTMLCanvasElement | null>(null);
+  const stage = useRef<{ scene: Scene; camera: ArcRotateCamera; avatar?: ReturnType<typeof makeAvatar>; headY?: number } | null>(null);
+  const framingRef = useRef(framing);
+  framingRef.current = framing;
   const lookKey = JSON.stringify(look);
+  const frame = (camera: ArcRotateCamera, f: 'face' | 'full', headY?: number) => {
+    camera.target = f === 'face' ? new Vector3(0, headY ?? 1.7, 0) : new Vector3(0, 1.0, 0);
+    camera.radius = camera.lowerRadiusLimit = camera.upperRadiusLimit = f === 'face' ? 1.0 : 3.6;
+  };
+
   useEffect(() => {
     if (!ref.current) return;
-    const engine = new Engine(ref.current, true, { preserveDrawingBuffer: true });
+    const engine = createEngine(ref.current, { preserveDrawingBuffer: true });
     const scene = new Scene(engine);
     scene.clearColor.set(0, 0, 0, 0);
-    const target = framing === 'face' ? new Vector3(0, 1.78, 0) : new Vector3(0, 1.0, 0);
-    const camera = new ArcRotateCamera('cam', Math.PI / 2, Math.PI / 2.1, framing === 'face' ? 1.1 : 3.6, target, scene);
+    const camera = new ArcRotateCamera('cam', Math.PI / 2, Math.PI / 2.1, 3.6, Vector3.Zero(), scene);
     camera.minZ = 0.05; // default near plane (1 unit) clips the close-up face shot
     if (interactive) camera.attachControl(ref.current, true);
-    camera.lowerRadiusLimit = camera.upperRadiusLimit = camera.radius;
     camera.upperBetaLimit = camera.lowerBetaLimit = camera.beta;
-    new HemisphericLight('a', new Vector3(0, 1, 0.3), scene).intensity = 0.9;
+    frame(camera, framingRef.current);
+    // Studio lighting: soft fill, warm key from the front-left, violet rim from behind.
+    const fill = new HemisphericLight('fill', new Vector3(0, 1, 0.3), scene);
+    fill.intensity = 0.55;
+    fill.groundColor = new Color3(0.18, 0.1, 0.25);
+    const key = new DirectionalLight('key', new Vector3(0.6, -0.5, -1), scene);
+    key.intensity = 1.1;
+    key.diffuse = new Color3(1, 0.9, 0.82);
     const rim = new PointLight('rim', new Vector3(-2, 3, -2), scene);
     rim.diffuse = new Color3(0.55, 0.3, 1);
     rim.intensity = 12;
-    // Camera sits on +Z looking back at the origin, and avatars face +Z, so no rotation needed.
-    const h = makeHumanoid(scene, 'preview', look, new Color3(0.55, 0.35, 1));
+    applyCinematicLook(scene, [camera], { compact: true, exposure: 1.2, bloomWeight: 0.25, vignette: 0 });
+    stage.current = { scene, camera };
     let spin = 0;
     engine.runRenderLoop(() => {
       spin += engine.getDeltaTime() / 1000;
-      if (framing === 'full') h.root.rotation.y = Math.sin(spin * 0.6) * 0.6;
+      const a = stage.current?.avatar;
+      if (a) a.root.rotation.y = framingRef.current === 'full' ? Math.sin(spin * 0.6) * 0.6 : 0;
+      a?.animateWalk(false, engine.getDeltaTime() / 1000);
       scene.render();
     });
     const onResize = () => engine.resize();
     window.addEventListener('resize', onResize);
-    return () => { window.removeEventListener('resize', onResize); scene.dispose(); engine.dispose(); };
+    return () => {
+      window.removeEventListener('resize', onResize);
+      stage.current = null;
+      disposeEngine(engine, scene);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lookKey, framing]);
+  }, []);
+
+  // Framing (face/full) is a camera move, not a new engine.
+  useEffect(() => {
+    const st = stage.current;
+    if (st) frame(st.camera, framing, st.headY);
+  }, [framing]);
+
+  useEffect(() => {
+    const st = stage.current;
+    if (!st) return;
+    st.avatar?.root.dispose();
+    // Camera sits on +Z looking back at the origin, and avatars face +Z, so no rotation needed.
+    // Face framing follows the real head once the model loads (heights differ per base model).
+    st.avatar = makeAvatar(st.scene, 'preview', look, new Color3(0.55, 0.35, 1), undefined, undefined, {
+      lite: true,
+      onReady: ({ headY }) => { st.headY = headY; frame(st.camera, framingRef.current, headY); },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookKey]);
+
   return <canvas ref={ref} className={`preview-canvas ${framing} ${interactive ? '' : 'passive'}`} />;
 }
 
@@ -115,11 +166,14 @@ export function Creator({ initial, saving, onComplete, initialStep = 1, mode = '
   const [step, setStep] = useState(initialStep);
   const [bio, setBio] = useState(initial.bio);
   const [intent, setIntent] = useState(initial.intent || 'socialize');
-  const [prefs, setPrefs] = useState<Preferences>(initial.preferences);
+  // Older profiles saved "everyone" as an empty Show me list; show that as every option ticked.
+  const [prefs, setPrefs] = useState<Preferences>(() => initial.preferences.show_me.length ? initial.preferences : { ...initial.preferences, show_me: SHOW_ME.map((g) => g.id) });
   const setPref = <K extends keyof Preferences>(key: K, value: Preferences[K]) => setPrefs((p) => ({ ...p, [key]: value }));
   const toggleIn = (key: 'interests' | 'boundaries' | 'show_me', id: string, max = 99) => setPrefs((p) => {
     const list = p[key];
-    return { ...p, [key]: list.includes(id) ? list.filter((x) => x !== id) : list.length >= max ? list : [...list, id] };
+    // Show me keeps at least one option: an empty list would silently mean everyone again.
+    if (list.includes(id)) return key === 'show_me' && list.length === 1 ? p : { ...p, [key]: list.filter((x) => x !== id) };
+    return { ...p, [key]: list.length >= max ? list : [...list, id] };
   });
   const [alias, setAlias] = useState(initial.alias);
   const [gender, setGender] = useState(initial.gender);
@@ -143,138 +197,156 @@ export function Creator({ initial, saving, onComplete, initialStep = 1, mode = '
   const canFinish = step1Ok;
 
   return <div className="creator">
+    <div className="creator-card-back" aria-hidden="true" />
     <div className="creator-card">
       {mode === 'edit' && onCancel && <button className="creator-cancel icon-btn" aria-label="Cancel editing" onClick={onCancel}>×</button>}
-      {step === 1 && <>
-        <h2>Create your profile</h2>
-        <p className="creator-sub">Create your identity.</p>
-        <div className="avatar-badge">👤</div>
-        <label>Alias name</label>
-        <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="e.g., Jay123" maxLength={24} />
-        <label>Gender</label>
-        <div className="gender-row">
-          {GENDERS.map((g) => <button key={g.id} className={`gender ${gender === g.id ? 'selected' : ''}`} onClick={() => chooseGender(g.id)}>
-            <span>{g.icon}</span>{g.label}
-          </button>)}
-        </div>
-        <label>Likes in a partner <em>(pick up to 3)</em></label>
-        <div className="trait-row">
-          {PARTNER_TRAITS.map((t) => <button key={t.id} className={`trait ${likes.includes(t.id) ? 'selected' : ''}`} onClick={() => toggleLike(t.id)}>[{t.id} {t.icon}]</button>)}
-        </div>
-      </>}
+      <nav className="creator-progress" aria-label={`Step ${step} of ${STEPS}`}>
+        {STEP_NAMES.map((name, i) => {
+          const n = i + 1;
+          return <button key={name} type="button" className={n === step ? 'now' : n < step ? 'done' : ''} aria-current={n === step ? 'step' : undefined}
+            disabled={n !== 1 && !step1Ok} onClick={() => setStep(n)}><i /><span>{name}</span></button>;
+        })}
+      </nav>
+      <div className="creator-body" key={step}>
+        {step === 1 && <>
+          <h2>Create your profile</h2>
+          <p className="creator-sub">Create your identity.</p>
+          <div className="avatar-live"><Preview look={look} framing="face" interactive={false} /></div>
+          <Field icon={AtSign} label="Alias name" prefix="@" value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="Jay123" maxLength={24} valid={alias.trim().length >= 2} />
+          <label>Gender</label>
+          <div className="gender-row">
+            {GENDERS.map((g) => <button key={g.id} className={`gender ${gender === g.id ? 'selected' : ''}`} onClick={() => chooseGender(g.id)}>
+              <span>{g.icon}</span>{g.label}
+            </button>)}
+          </div>
+          <label>Likes in a partner <em>(pick up to 3)</em></label>
+          <div className="trait-row">
+            {PARTNER_TRAITS.map((t) => <button key={t.id} className={`trait ${likes.includes(t.id) ? 'selected' : ''}`} onClick={() => toggleLike(t.id)}>{t.id} {t.icon}</button>)}
+          </div>
+        </>}
 
-      {step === 2 && <>
-        <h2>Build your character</h2>
-        <p className="creator-sub">Craft your look.</p>
-        <div className="preview-box face"><Preview look={look} framing="face" /></div>
-        <div className="build-grid">
-          <div>
-            <label>Hair</label>
-            <input type="range" min={0} max={1} step={0.01} value={look.hair_length} onChange={(e) => set('hair_length', +e.target.value)} />
-            <div className="range-legend"><span>short</span><span>long</span></div>
+        {step === 2 && <>
+          <h2>Build your character</h2>
+          <p className="creator-sub">Craft your look.</p>
+          <div className="preview-box face"><Preview look={look} framing="face" /></div>
+          <div className="build-grid">
+            <div>
+              <label>Hair</label>
+              <input type="range" min={0} max={1} step={0.01} value={look.hair_length} onChange={(e) => set('hair_length', +e.target.value)} />
+              <div className="range-legend"><span>short</span><span>long</span></div>
+            </div>
+            <div className="hair-colors">
+              {HAIR_COLORS.map((c) => <button key={c} aria-label={c} className={look.hair_color === c ? 'selected' : ''} style={{ background: c }} onClick={() => set('hair_color', c)} />)}
+            </div>
           </div>
-          <div className="hair-colors">
-            {HAIR_COLORS.map((c) => <button key={c} aria-label={c} className={look.hair_color === c ? 'selected' : ''} style={{ background: c }} onClick={() => set('hair_color', c)} />)}
+          <label>Skin tone</label>
+          <input className="skin-slider" type="range" min={0} max={1} step={0.01} value={look.skin_tone} onChange={(e) => set('skin_tone', +e.target.value)} />
+          <label>Facial structure</label>
+          <div className="face-pads">
+            <FacePad label={['Long', 'Short', 'Narrow', 'Wide']} x={look.face[0]} y={look.face[1]} onChange={(x, y) => set('face', [x, y, look.face[2], look.face[3]])} />
+            <FacePad label={['Strong jaw', 'Soft jaw', 'Flat', 'Defined']} x={look.face[2]} y={look.face[3]} onChange={(x, y) => set('face', [look.face[0], look.face[1], x, y])} />
           </div>
-        </div>
-        <label>Skin tone</label>
-        <input className="skin-slider" type="range" min={0} max={1} step={0.01} value={look.skin_tone} onChange={(e) => set('skin_tone', +e.target.value)} />
-        <label>Facial structure</label>
-        <div className="face-pads">
-          <FacePad label={['Long', 'Short', 'Narrow', 'Wide']} x={look.face[0]} y={look.face[1]} onChange={(x, y) => set('face', [x, y, look.face[2], look.face[3]])} />
-          <FacePad label={['Strong jaw', 'Soft jaw', 'Flat', 'Defined']} x={look.face[2]} y={look.face[3]} onChange={(x, y) => set('face', [look.face[0], look.face[1], x, y])} />
-        </div>
-        <label>Body type</label>
-        <input type="range" min={0} max={1} step={0.01} value={look.body_type} onChange={(e) => set('body_type', +e.target.value)} />
-        <button className="randomize" onClick={() => setLook(randomLook(gender))}>Randomize unique look 🎲</button>
-      </>}
+          <label>Body type</label>
+          <input type="range" min={0} max={1} step={0.01} value={look.body_type} onChange={(e) => set('body_type', +e.target.value)} />
+          <button className="randomize" onClick={() => setLook(randomLook(gender))}>Randomize unique look 🎲</button>
+        </>}
 
-      {step === 3 && <>
-        <h2>Select your outfit</h2>
-        <p className="creator-sub">Dress the part.</p>
-        <div className="preview-box full"><Preview look={look} framing="full" /></div>
-        <Carousel title="Top" items={TOPS} value={look.top} onChange={(id) => set('top', id)} />
-        <Carousel title="Bottom" items={BOTTOMS} value={look.bottom} onChange={(id) => set('bottom', id)} />
-        <Carousel title="Accessories" items={ACCESSORIES} value={look.accessory} onChange={(id) => set('accessory', id)} />
-        <div className="carousel">
-          <h4>Style</h4>
-          <div className="style-row">
-            {STYLES.map((s) => <button key={s.id} className={`style ${look.style === s.id ? 'selected' : ''}`} onClick={() => chooseStyle(s.id)}><span>{s.icon}</span>{s.label}</button>)}
+        {step === 3 && <>
+          <h2>Select your outfit</h2>
+          <p className="creator-sub">Dress the part.</p>
+          <div className="preview-box full"><Preview look={look} framing="full" /></div>
+          <Carousel title="Top" items={TOPS} value={look.top} onChange={(id) => set('top', id)} />
+          <Carousel title="Bottom" items={BOTTOMS} value={look.bottom} onChange={(id) => set('bottom', id)} />
+          <Carousel title="Accessories" items={ACCESSORIES} value={look.accessory} onChange={(id) => set('accessory', id)} />
+          <div className="carousel">
+            <h4>Style</h4>
+            <div className="style-row">
+              {STYLES.map((s) => <button key={s.id} className={`style ${look.style === s.id ? 'selected' : ''}`} onClick={() => chooseStyle(s.id)}><span>{s.icon}</span>{s.label}</button>)}
+            </div>
           </div>
-        </div>
-      </>}
+        </>}
 
-      {step === 4 && <>
-        <h2>Your preferences</h2>
-        <p className="creator-sub">Who and what you're here for.</p>
-        <label>I'm here to</label>
-        <div className="trait-row">
-          {INTENTS.map((i) => <button key={i.id} className={`trait ${intent === i.id ? 'selected' : ''}`} onClick={() => setIntent(i.id)}>{i.icon} {i.label}</button>)}
-        </div>
-        <label>Relationship style</label>
-        <div className="trait-row">
-          {RELATIONSHIP_STYLES.map((r) => <button key={r.id} className={`trait ${prefs.relationship_style === r.id ? 'selected' : ''}`} onClick={() => setPref('relationship_style', prefs.relationship_style === r.id ? '' : r.id)}>{r.label}</button>)}
-        </div>
-        <Toggle label="Show on my profile" checked={prefs.public_relationship_style} onChange={(v) => setPref('public_relationship_style', v)} />
-        <label>Interests <em>(up to {MAX_INTERESTS})</em></label>
-        <div className="trait-row">
-          {INTERESTS.map((i) => <button key={i} className={`trait ${prefs.interests.includes(i) ? 'selected' : ''}`} onClick={() => toggleIn('interests', i, MAX_INTERESTS)}>{i}</button>)}
-        </div>
-        <Toggle label="Show on my profile" checked={prefs.public_interests} onChange={(v) => setPref('public_interests', v)} />
-        <label>Boundaries <em>(never invite me to)</em></label>
-        <div className="trait-row">
-          {INVITATION_TYPES.map((b) => <button key={b.id} className={`trait boundary ${prefs.boundaries.includes(b.id) ? 'selected' : ''}`} onClick={() => toggleIn('boundaries', b.id)}>{prefs.boundaries.includes(b.id) ? '⛔ ' : ''}{b.label}</button>)}
-        </div>
-        <p className="creator-hint">Nobody can send you these. You can still decline anything else, any time.</p>
-        <label>Show me <em>(none selected = everyone)</em></label>
-        <div className="trait-row">
-          {SHOW_ME.map((g) => <button key={g.id} className={`trait ${prefs.show_me.includes(g.id) ? 'selected' : ''}`} onClick={() => toggleIn('show_me', g.id)}>{g.label}</button>)}
-        </div>
-        <Toggle label="Discoverable" hint="Appear in other players' Nearby lists" checked={prefs.discoverable} onChange={(v) => setPref('discoverable', v)} />
-      </>}
+        {step === 4 && <>
+          <h2>Your preferences</h2>
+          <p className="creator-sub">Who and what you're here for.</p>
+          <label>I'm here to</label>
+          <div className="trait-row">
+            {INTENTS.map((i) => <button key={i.id} className={`trait ${intent === i.id ? 'selected' : ''}`} onClick={() => setIntent(i.id)}>{i.icon} {i.label}</button>)}
+          </div>
+          <label>Relationship style</label>
+          <div className="trait-row">
+            {RELATIONSHIP_STYLES.map((r) => <button key={r.id} className={`trait ${prefs.relationship_style === r.id ? 'selected' : ''}`} onClick={() => setPref('relationship_style', prefs.relationship_style === r.id ? '' : r.id)}>{r.label}</button>)}
+          </div>
+          <Toggle label="Show on my profile" checked={prefs.public_relationship_style} onChange={(v) => setPref('public_relationship_style', v)} />
+          <label>Interests <em>(up to {MAX_INTERESTS})</em></label>
+          <div className="trait-row">
+            {INTERESTS.map((i) => <button key={i} className={`trait ${prefs.interests.includes(i) ? 'selected' : ''}`} onClick={() => toggleIn('interests', i, MAX_INTERESTS)}>{i}</button>)}
+          </div>
+          <Toggle label="Show on my profile" checked={prefs.public_interests} onChange={(v) => setPref('public_interests', v)} />
+          <label>Boundaries <em>(never invite me to)</em></label>
+          <div className="trait-row">
+            {INVITATION_TYPES.map((b) => <button key={b.id} className={`trait boundary ${prefs.boundaries.includes(b.id) ? 'selected' : ''}`} onClick={() => toggleIn('boundaries', b.id)}>{prefs.boundaries.includes(b.id) ? '⛔ ' : ''}{b.label}</button>)}
+          </div>
+          <p className="creator-hint">Nobody can send you these. You can still decline anything else, any time.</p>
+          <label>Show me <em>(who you'll see)</em></label>
+          <div className="trait-row">
+            {SHOW_ME.map((g) => <button key={g.id} className={`trait ${prefs.show_me.includes(g.id) ? 'selected' : ''}`} onClick={() => toggleIn('show_me', g.id)}>{g.label}</button>)}
+          </div>
+          <Toggle label="Discoverable" hint="Appear in other players' Nearby lists" checked={prefs.discoverable} onChange={(v) => setPref('discoverable', v)} />
+        </>}
 
-      {step === 5 && <>
-        <h2>Identity complete</h2>
-        <p className="creator-sub">Final review.</p>
-        <div className="review-card">
-          <div className="review-visuals">
-            <div className="preview-box face small"><Preview look={look} framing="face" /></div>
-            <div className="preview-box full small"><Preview look={look} framing="full" /></div>
+        {step === 5 && <>
+          <h2>Identity complete</h2>
+          <p className="creator-sub">Final review.</p>
+          <div className="review-card">
+            <div className="review-visuals">
+              <div className="preview-box face small"><Preview look={look} framing="face" /></div>
+              <div className="preview-box full small"><Preview look={look} framing="full" /></div>
+            </div>
+            <dl>
+              <dt>Alias</dt><dd><b>@{alias.trim()}</b></dd>
+              <dt>Gender</dt><dd>{GENDERS.find((g) => g.id === gender)?.label}</dd>
+              <dt>Likes</dt><dd className="review-likes">{likes.map((l) => <span key={l}>{l} {PARTNER_TRAITS.find((t) => t.id === l)?.icon}</span>)}</dd>
+              <dt>Style</dt><dd><b>{STYLES.find((s) => s.id === look.style)?.label}</b> · {findItem(TOPS, look.top).label}, {findItem(BOTTOMS, look.bottom).label}</dd>
+            </dl>
+            <div className="match-code">{code} (unique match)</div>
+            <div className="ready-check">
+              <div className="ready-head"><b>{canFinish ? "You're ready for Lagos" : 'Almost there'}</b><span>{canFinish ? 4 : 3}/4</span></div>
+              <div className="ready-tiles">
+                {CHECKLIST.map(({ label, step: at, Icon }, i) => {
+                  const done = at !== 1 || step1Ok;
+                  return <button key={label} type="button" className={`ready-tile ${done ? 'done' : ''}`} style={{ '--i': i } as React.CSSProperties} onClick={() => setStep(at)} aria-label={`${label}: ${done ? 'done' : 'needs attention'}. Edit`}>
+                    <span className="ready-icon"><Icon size={20} strokeWidth={2.2} /><i>{done ? <Check size={11} strokeWidth={4} /> : '!'}</i></span>
+                    {label}
+                  </button>;
+                })}
+              </div>
+            </div>
           </div>
-          <dl>
-            <dt>Alias:</dt><dd>[{alias.trim()}]</dd>
-            <dt>Gender:</dt><dd>[{GENDERS.find((g) => g.id === gender)?.label}]</dd>
-            <dt>Likes:</dt><dd>[{likes.map((l) => `${l} ${PARTNER_TRAITS.find((t) => t.id === l)?.icon ?? ''}`).join(', ')}]</dd>
-            <dt>Style:</dt><dd>[{STYLES.find((s) => s.id === look.style)?.label}] · {findItem(TOPS, look.top).label}, {findItem(BOTTOMS, look.bottom).label}</dd>
-          </dl>
-          <div className="match-code">{code} (unique match)</div>
-          <p className="checks">Step 1 process complete: <b>✔ Looks</b> <b>✔ Outfit</b> <b>✔ Name</b> <b>✔ Preferences</b></p>
-        </div>
-        <div className="public-preview">
-          <h4>How others see you</h4>
-          <textarea value={bio} maxLength={MAX_BIO_CHARS} rows={2} placeholder="Add a short bio (optional)" onChange={(e) => setBio(e.target.value)} />
-          <div className="bio-count">{bio.length}/{MAX_BIO_CHARS}</div>
-          <div className="pill-row">
-            {prefs.public_relationship_style && prefs.relationship_style && <span className="pill">{labelOf(RELATIONSHIP_STYLES, prefs.relationship_style)}</span>}
-            {prefs.public_interests && prefs.interests.map((i) => <span key={i} className="pill">{i}</span>)}
-            {!(prefs.public_interests && prefs.interests.length) && !(prefs.public_relationship_style && prefs.relationship_style) && <span className="pill muted">No public details</span>}
+          <div className="public-preview">
+            <h4>How others see you</h4>
+            <textarea value={bio} maxLength={MAX_BIO_CHARS} rows={2} placeholder="Add a short bio (optional)" onChange={(e) => setBio(e.target.value)} />
+            <div className="bio-count">{bio.length}/{MAX_BIO_CHARS}</div>
+            <div className="pill-row">
+              {prefs.public_relationship_style && prefs.relationship_style && <span className="pill">{labelOf(RELATIONSHIP_STYLES, prefs.relationship_style)}</span>}
+              {prefs.public_interests && prefs.interests.map((i) => <span key={i} className="pill">{i}</span>)}
+              {!(prefs.public_interests && prefs.interests.length) && !(prefs.public_relationship_style && prefs.relationship_style) && <span className="pill muted">No public details</span>}
+            </div>
+            <p className="visibility">{prefs.discoverable ? '👁 Visible in Nearby lists' : '🙈 Hidden from Nearby lists'} · intent and boundaries stay private</p>
+            <div className="preview-edit">
+              <button className="ghost" onClick={() => setStep(1)}><PencilLine size={15} strokeWidth={2.4} /> Character</button>
+              <button className="ghost" onClick={() => setStep(4)}><PencilLine size={15} strokeWidth={2.4} /> Preferences</button>
+            </div>
           </div>
-          <p className="visibility">{prefs.discoverable ? '👁 Visible in Nearby lists' : '🙈 Hidden from Nearby lists'} · intent and boundaries stay private</p>
-          <div className="preview-edit">
-            <button className="ghost" onClick={() => setStep(1)}>[ Edit character ]</button>
-            <button className="ghost" onClick={() => setStep(4)}>[ Edit preferences ]</button>
-          </div>
-        </div>
-        <button className="enter-city" disabled={saving || !canFinish} onClick={() => onComplete({ alias: alias.trim(), gender, likes, look, match_code: code, bio: bio.trim(), intent, preferences: prefs })}>
-          {saving ? 'Saving…' : mode === 'edit' ? '[ Save changes → ]' : '[ Enter the city → ]'}
-        </button>
-      </>}
-
-      <div className="creator-nav">
-        {step > 1 ? <button className="ghost" onClick={() => setStep((s) => s - 1)}>[ Back ]</button> : <span />}
-        {step < STEPS && <button disabled={!canNext} onClick={() => setStep((s) => s + 1)}>{step === STEPS - 1 ? '[ Review ]' : '[ Next ]'}</button>}
+          <button className="enter-city" disabled={saving || !canFinish} onClick={() => onComplete({ alias: alias.trim(), gender, likes, look, match_code: code, bio: bio.trim(), intent, preferences: prefs })}>
+            {saving ? 'Saving…' : <>{mode === 'edit' ? 'Save changes' : 'Enter the city'} <ArrowRight size={20} strokeWidth={2.8} /></>}
+          </button>
+        </>}
       </div>
-      <div className="creator-step">({step}/{STEPS})</div>
+      <div className="creator-nav">
+        {step > 1 ? <button className="ghost" onClick={() => setStep((s) => s - 1)}><ArrowLeft size={18} strokeWidth={2.8} /> Back</button> : <span />}
+        {step < STEPS && <button disabled={!canNext} onClick={() => setStep((s) => s + 1)}>{step === STEPS - 1 ? 'Review' : 'Next'} <ArrowRight size={18} strokeWidth={2.8} /></button>}
+      </div>
     </div>
   </div>;
 }

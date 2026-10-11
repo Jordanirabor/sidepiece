@@ -95,21 +95,26 @@ compatible → match → chat → agree on an activity → experience the scene 
 
 **Accept:** ✅ smoke covers one-sided like → no match, mutual → match, unseen-once, matched/passed excluded from the deck, NPC needs Friendly, self-like 400, block → 404 and hides the match. ✅ Pass hides for 24h server-side (survives reload). ui-check drives deck → detail → like/pass → like-back match moment → Messages. 29 Rust tests.
 
-## M5: Messages  *(spec 09, 09A, 17. Also the poster's "phone")*
-- [ ] Player↔player DMs (persisted, realtime via room server or a dedicated channel), plus an inbox.
-- [ ] Chat header with presence, profile shortcut and a more menu (mute / block / report / end) with confirmations.
-- [ ] NPC threads appear in the same inbox.
+## M5: Messages  *(spec 09, 09A, 17. Also the poster's "phone"; ADR 0011)* — ✅ done
+- [x] Player↔player DMs between matched players, persisted (`dm_messages`), plus an inbox (`messages.rs`, `Messages.tsx`). Delivery is **polling** (thread 3 s, inbox 5 s), not push. See ADR 0011.
+- [x] Chat header with presence, a profile shortcut (3D avatar sheet + "Meet at <venue>") and a ⋯ menu: mute / end / block / report, each explained, destructive ones confirmed.
+- [x] NPC threads appear in the same inbox and open the NPC chat.
 
-**Accept:** messages survive reload. Blocked players can't message. Smoke test covers it.
+**Accept:** ✅ messages survive reload (server-side history). ✅ Unmatched → 403, blocked → 404. ✅ Smoke covers send, unread/read, mute (stays out of the badge, survives End), end then reopen on a new message, unmatched, blocked. ui-check drives match → thread → send → controls → inbox at both viewports. 31 Rust tests (25 api + 6 common).
 
-## M6: Invitations & date scenes  *(spec 10, 11, 12)*
-- [ ] "Suggest activity" sheet: public date / venue visit / private location, with ₦ costs.
-- [ ] In-chat **InvitationCard** with pending/accepted/declined/expired/cancelled and an expiry.
-- [ ] Date scenes (rooftop dinner, lounge booth) with 2–3 dialogue choices per beat, an objective, and Leave.
+> Carry-overs: realtime push for DMs (ADR 0011 "revisit when"), quick reactions/emoji (optional in spec), 3D avatars in inbox rows, "Suggest date/venue" → M6.
 
-**Accept:**
-- Decline, cancel, expiry and leave are all tested.
-- A declined invite never blocks the chat.
+## M6: Invitations & date scenes  *(spec 10, 11, 12; ADR 0013)* — ✅ done
+- [x] "Suggest activity" sheet: keep chatting / public date (Rooftop date) / venue visit (Lounge night) / private location, with ₦ costs (placeholders, need client input). From DM threads and NPC chat.
+- [x] In-chat **InvitationCard** with pending/accepted/declined/expired/cancelled, a 10-minute expiry, and cancel. Sender pays on accept only. One pending per pair plus a 30-min cooldown after a decline (no nagging).
+- [x] Date scenes (rooftop date, lounge booth) in the real venue with both avatars: 3 beats × 3 choices, a shared chemistry objective, Leave (confirmed, no penalty), partner drop-off recovery, and a one-time XP + affinity reward.
+- [x] NPCs answer invitations from the relationship (dates from Friendly, private from Friend) and play the date with you.
+
+**Accept:** ✅ smoke covers decline (free, cooldown, chat continues), cancel, expiry (dev-only short TTL), leave, double-accept, wrong side answering, outsiders (404), boundaries (403), blocks (404), hidden picks until both choose, rewards granted exactly once, private room on accept, and NPC consent. ✅ A declined invite never blocks the chat. ui-check drives suggest → invite → accept → 3 beats → outcome → incoming invite → accept → Leave, at both viewports. 38 Rust tests (32 api + 6 common).
+
+> Also fixed: the M5 thread poll refetched immediately after every response (it depended on the thread object), causing a request storm and flaky status updates. It now keys on the thread id.
+
+> Carry-overs: seated pose for date avatars; more scene scripts; ₦ rewards + partner feedback on the outcome (M7, Screen 14); private-room encounter content (M7, Screen 13); realtime push for beat sync (ADR 0011/0013 "revisit when").
 
 ## M7: Encounters, outcomes & progression  *(spec 13, 14, 15, 15A. ADR 0003)*
 - [ ] Private encounter: both confirm → non-graphic scene / fade-to-black. Skip/Leave is always visible.
@@ -130,7 +135,12 @@ compatible → match → chat → agree on an activity → experience the scene 
 
 ## Parallel tracks (need client decisions)
 
-- **Art pipeline** (ADR 0004): pick a stylized asset source (Synty POLYGON? commissioned?), check the web licence, build glTF avatars driven by `AvatarLook`.
+- **Art pipeline** (ADR 0012, decided 2026-10-10: semi-realistic, open-licence assets):
+  - [x] Phase 1 rendering: filmic post-processing, key shadows + contact shadows, wet-floor reflections, procedural textured surfaces with normal maps, low/high quality tiers (`web/src/render.ts`).
+  - [x] Phase 2 characters (interim): 9 Microsoft Rocketbox (MIT) base models → glTF (`web/src/avatar3d.ts`, `scripts/avatars/`), nearest base by gender/skin/outfit + hair tint, body scale, head-bone accessories; idle/walk blending; 512px variants for phones/portraits; primitive humanoid as fallback. Outfit/clothing colour don't visibly change the model yet.
+  - [ ] **Pinned (owner, 2026-10-11): fully parametric creator** (one base body with morphs, continuous skin tone, swappable hair/clothes). Recommended route: MakeHuman/MPFB2 (CC0) authored in Blender, which the owner will install. Rocketbox stays until then.
+  - [ ] Phase 3 props: CC0 furniture and venue dressing (e.g. Poly Haven).
+- **Interface refresh v2** (design-system.md, 2026-10-11): Bricolage Grotesque + Plus Jakarta Sans + Caveat accents, lucide icons, glass surfaces, aurora backgrounds, poster-style welcome (floating notifications, sticky note, ticker) and auth, profile hero/tiles with "Meet someone new" first, story row in Messages, full-bleed Discover cards, floating capsule nav with a raised Discover button (compact and centred on desktop).
 - **Language-model provider** (ADR 0005): choose a provider and model, then set `LLM_*` in Dokploy.
 - **Age verification** before public launch (ADR 0003).
 - **Email provider** for verification and password reset.

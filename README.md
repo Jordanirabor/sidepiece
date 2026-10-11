@@ -40,25 +40,24 @@ MinIO is optional at this stage because the MVP does not load assets from object
 docker compose -f docker-compose.yml -f docker-compose.minio.yml up --build
 ```
 
-Open the web client:
+The dev stack publishes everything on host ports 4001–4005:
 
-```txt
-http://localhost:3001
-```
+| Port | Service |
+| ---- | ------- |
+| 4001 | web client: http://localhost:4001 |
+| 4002 | API |
+| 4003 | room server (WebSocket) |
+| 4004 | Postgres |
+| 4005 | Redis |
 
-If you want a different web port:
-
-```bash
-WEB_PORT=3010 docker compose up --build
-# or for hot reload
-WEB_PORT=3010 docker compose -f docker-compose.dev.yml up --build
-```
+NATS stays internal to the Docker network. Override any port with `WEB_PORT`, `API_PORT`, `ROOM_PORT`,
+`POSTGRES_PORT` or `REDIS_PORT`, e.g. `WEB_PORT=4010 docker compose -f docker-compose.dev.yml up --build`.
 
 Health checks:
 
 ```bash
-curl http://localhost:4000/health
-curl http://localhost:4001/health
+curl http://localhost:4002/health
+curl http://localhost:4003/health
 ```
 
 ## MVP flow

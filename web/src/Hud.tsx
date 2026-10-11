@@ -14,15 +14,15 @@ type ChatProps = {
   onSend: (text: string) => void;
   onClose: () => void;
   onInterest: () => void;
-  onPrivate: () => void;
+  /** Opens the Suggest activity sheet (spec 10). The NPC answers from the relationship, server-side. */
+  onPlans: () => void;
 };
 
-export function NpcChat({ thread, typing, onSend, onClose, onInterest, onPrivate }: ChatProps) {
+export function NpcChat({ thread, typing, onSend, onClose, onInterest, onPlans }: ChatProps) {
   const [draft, setDraft] = useState('');
   const logRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' }); }, [thread.messages.length, typing]);
   const r = thread.relationship;
-  const canGoPrivate = r.tier_index >= 4;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,7 +56,7 @@ export function NpcChat({ thread, typing, onSend, onClose, onInterest, onPrivate
     </form>
     <div className="npc-actions">
       <button className="ghost" onClick={onInterest}>Show interest</button>
-      <button className="ghost" disabled={!canGoPrivate} title={canGoPrivate ? '' : 'Become friends first'} onClick={onPrivate}>Somewhere private</button>
+      <button className="ghost" onClick={onPlans}>Make plans</button>
     </div>
   </div>;
 }
