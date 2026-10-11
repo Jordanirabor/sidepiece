@@ -3,6 +3,7 @@ import { api, ApiError } from './api';
 import { Preview } from './Creator';
 import { DEFAULT_LOOK, Look } from './look';
 import { labelOf, RELATIONSHIP_STYLES } from './prefs';
+import { Heart, Info, X } from 'lucide-react';
 import { EmptyState, ErrorState } from './ui';
 
 /** Mirrors `DiscoverableProfile` (crates/common). */
@@ -169,9 +170,9 @@ export function Discover({ playerId, myInterests, onClose, onMatch, notify, onBr
       </article>
       </div>
       <div className="deck-actions">
-        <button className="round pass" aria-label="Pass" disabled={busy} onClick={() => act('pass')}>✕</button>
-        <button className="round info ghost" aria-label="View profile" onClick={() => setDetail(true)}>i</button>
-        <button className="round like" aria-label="Like" disabled={busy} onClick={() => act('like')}>♥</button>
+        <button className="round pass" aria-label="Pass" disabled={busy} onClick={() => act('pass')}><X size={26} strokeWidth={3} /></button>
+        <button className="round info ghost" aria-label="View profile" onClick={() => setDetail(true)}><Info size={20} strokeWidth={2.5} /></button>
+        <button className="round like" aria-label="Like" disabled={busy} onClick={() => act('like')}><Heart size={30} strokeWidth={0} fill="currentColor" /></button>
       </div>
       <p className="deck-hint">Tap the card for their profile · swipe or use ← → keys</p>
     </div>}

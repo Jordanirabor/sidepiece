@@ -1,6 +1,6 @@
 # AGENTS.md: Side Piece
 
-You are working on **Side Piece**: a mobile-first, web-based, **stylized 3D adult (18+) social world set in
+You are working on **Side Piece**: a mobile-first, web-based, **semi-realistic 3D adult (18+) social world set in
 Lagos nightlife**. Players build a character, enter the city, meet compatible people (players + NPCs), chat
 (free-text, scored), agree on dates and private experiences (always consent-gated), and progress
 (₦, XP, reputation, relationships, body count). Tagline: *Same People. New Options.*
@@ -35,7 +35,8 @@ Project skills in `.agents/skills/` load on demand:
   decline, cancel and leave paths. Block hides both ways; report is always reachable. (ADR 0003)
 - **Non-graphic** intimate content (fade-to-black). Language-model output stays non-explicit.
 - **Server is authoritative** for money, XP, needs, relationships, body count, consent state and room access.
-- **Stylized 3D**, not photoreal (ADR 0004). Same avatar everywhere.
+- **Semi-realistic 3D**, not photoreal (ADR 0012, supersedes 0004). Same avatar everywhere. Every 3D canvas goes
+  through `web/src/render.ts` (`createEngine` + `applyCinematicLook`) and respects the `low`/`high` quality tiers.
 - **Design system tokens only** (`docs/product/design-system.md`). No ad-hoc colours or spacing.
 - Never ship or bundle anything from `docs/references/` (third-party, reference-only).
 
@@ -43,13 +44,15 @@ Project skills in `.agents/skills/` load on demand:
 
 ```
 apps/api/            Axum HTTP API: auth.rs, chat.rs (NPC LLM chat), life.rs (needs/₦/XP/clock),
-                     npcs.rs (NPC catalog), main.rs (rooms, discovery, social, moderation, routes)
+                     npcs.rs (NPC catalog), matching.rs, messages.rs (DMs), invites.rs (activity invitations),
+                     dates.rs (date scenes), main.rs (rooms, discovery, social, moderation, routes)
 apps/room-server/    WebSocket rooms: join tickets, roster, movement, room chat, Redis presence
 apps/event-worker/   NATS events.> → Postgres game_event_audit
 crates/common/       Shared wire types (AvatarLook, ClientEvent/ServerEvent, tiers…). Mirror them in TS.
 migrations/          sqlx migrations (run automatically by api/event-worker on start)
 web/src/             main.tsx (app flow), Creator.tsx (4-panel creator), SceneView.tsx (3D world + realtime),
                      venue.ts (venues + humanoid), look.ts (appearance model/catalogs), Hud.tsx (HUD + NPC chat), api.ts
+                     Messages.tsx (inbox + DM thread), Invites.tsx (suggest sheet + invitation cards), DateScene.tsx
 scripts/             smoke.mjs (API two-player flow; Node built-ins only)
 web/scripts/         ui-check.mjs (headless browser walkthrough + screenshots; puppeteer-core is a web devDependency)
 docs/                product truth, references, decisions, roadmap
@@ -59,7 +62,7 @@ deploy/dokploy.md    production deploy guide
 ## Run & verify
 
 ```bash
-docker compose -f docker-compose.dev.yml up --build   # hot reload: web :3001, api :4000, rooms :4001
+docker compose -f docker-compose.dev.yml up --build   # hot reload: web :4001, api :4002, rooms :4003, postgres :4004, redis :4005
 cargo fmt && cargo check && cargo test                 # 0 warnings expected
 cd web && pnpm build                                   # type-check + bundle
 node scripts/smoke.mjs                                 # end-to-end API flow (dev stack running)

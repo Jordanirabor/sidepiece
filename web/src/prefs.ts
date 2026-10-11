@@ -13,7 +13,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   relationship_style: '',
   interests: [],
   boundaries: [],
-  show_me: [],
+  show_me: ['male', 'female', 'non_binary'], // everyone; the server reads an empty list the same way
   discoverable: true,
   public_relationship_style: false,
   public_interests: true,

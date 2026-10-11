@@ -1,5 +1,7 @@
 # 0004: Stylized 3D art direction (not photoreal)
 
+> **Superseded by [0012](0012-semi-realistic-art-direction.md)** (2026-10-10): semi-realistic, open-licence assets.
+
 **Context.** The client's creator videos show realistic humans, and the spec's creator references are inZOI (photoreal). But the spec explicitly and repeatedly asks for **"stylized 3D"**, and its venue and avatar references are Synty POLYGON, Paralives, Thirsty Suitors and Sims-style art.
 
 **Decision.** Target **stylized 3D**: fashionable adults, a Black/African-forward cast, neon nightlife.

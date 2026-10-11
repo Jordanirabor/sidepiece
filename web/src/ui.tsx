@@ -1,4 +1,5 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useId } from 'react';
+import { Check, Flame, Heart, Map as MapIcon, MessageCircle, MessageCircleHeart, Moon, Smile, Sun, TriangleAlert, UserRound, Utensils, X, Zap, type LucideIcon } from 'lucide-react';
 import type { Life, Needs } from './Hud';
 import { RELATIONSHIP_STYLES } from './prefs';
 
@@ -9,12 +10,12 @@ const STYLE_LABELS: Record<string, string> = Object.fromEntries(RELATIONSHIP_STY
 // Every component here uses design-system tokens only (see docs/product/design-system.md).
 // ---------------------------------------------------------------------------
 
-const NEEDS: { key: keyof Needs; icon: string; label: string }[] = [
-  { key: 'energy', icon: '⚡', label: 'Energy' },
-  { key: 'hunger', icon: '🍴', label: 'Hunger' },
-  { key: 'mood', icon: '🙂', label: 'Mood' },
-  { key: 'social', icon: '💬', label: 'Social' },
-  { key: 'love', icon: '💗', label: 'Love' },
+const NEEDS: { key: keyof Needs; Icon: LucideIcon; label: string }[] = [
+  { key: 'energy', Icon: Zap, label: 'Energy' },
+  { key: 'hunger', Icon: Utensils, label: 'Hunger' },
+  { key: 'mood', Icon: Smile, label: 'Mood' },
+  { key: 'social', Icon: MessageCircle, label: 'Social' },
+  { key: 'love', Icon: Heart, label: 'Love' },
 ];
 
 export const needColor = (v: number) => (v >= 60 ? 'var(--success)' : v >= 30 ? 'var(--warning)' : 'var(--danger)');
@@ -45,6 +46,34 @@ export function AvatarPortrait({ name, kind = 'you', size = 40 }: { name: string
   return <div className={`avatar-orb ${kind}`} style={{ width: size, height: size, fontSize: size * 0.42 }}>{(name || '?')[0].toUpperCase()}</div>;
 }
 
+/**
+ * Text field with an icon bubble and a floating label. The bubble lights up on focus and flips to a check
+ * once `valid`; `hint` sits underline (tone colours it). `trailing` is for an inline button (e.g. show password).
+ */
+export function Field({ icon: Icon, label, valid, hint, hintTone, prefix, trailing, className, ...input }: {
+  icon: LucideIcon; label: string; valid?: boolean; hint?: React.ReactNode; hintTone?: 'good' | 'bad';
+  prefix?: string; trailing?: React.ReactNode;
+} & React.InputHTMLAttributes<HTMLInputElement>) {
+  const id = useId();
+  return <div className={`field ${valid ? 'valid' : ''} ${input.type === 'date' || prefix ? 'pinned' : ''} ${className ?? ''}`}>
+    <div className="field-box">
+      <span className="field-icon" aria-hidden="true">{valid ? <Check key="ok" size={18} strokeWidth={3} /> : <Icon key="icon" size={18} strokeWidth={2.4} />}</span>
+      <div className="field-body">
+        {prefix && <span className="field-prefix" aria-hidden="true">{prefix}</span>}
+        <input id={id} className="field-input" placeholder={input.placeholder ?? ' '} {...input} />
+        <label htmlFor={id}>{label}</label>
+      </div>
+      {trailing}
+    </div>
+    {hint && <div className={`field-hint ${hintTone ?? ''}`}>{hint}</div>}
+  </div>;
+}
+
+/** Brand mark after the poster: white "Side", hot-pink "piece" with a swoosh and a heart. */
+export function BrandLogo() {
+  return <h1 className="brand-logo">Side<span>piece<Heart className="logo-heart" fill="currentColor" strokeWidth={0} aria-hidden="true" /></span></h1>;
+}
+
 export type TopBarProps = { name: string; life?: Life; onProfile?: () => void };
 
 export function TopBar({ name, life, onProfile }: TopBarProps) {
@@ -58,28 +87,32 @@ export function TopBar({ name, life, onProfile }: TopBarProps) {
     </button>
     {life && <div className="topbar-needs">
       {NEEDS.map((n) => <span key={n.key} className="topbar-need" title={`${n.label} ${Math.round(life.needs[n.key])}`}>
-        <span className="need-icon">{n.icon}</span>
+        <n.Icon className="need-icon" size={13} strokeWidth={2.4} aria-hidden="true" />
         <NeedBar value={life.needs[n.key]} />
       </span>)}
     </div>}
-    {life && <div className="topbar-clock" title={life.clock.label}>{life.clock.is_night ? '🌙' : '☀️'} <b>{life.clock.label.split(' · ')[0]}</b><span className="clock-date"> · {life.clock.label.split(' · ').slice(1).join(' · ')}</span></div>}
+    {life && <div className="topbar-clock" title={life.clock.label}>{life.clock.is_night ? <Moon size={13} strokeWidth={2.4} aria-hidden="true" /> : <Sun size={13} strokeWidth={2.4} aria-hidden="true" />} <b>{life.clock.label.split(' · ')[0]}</b><span className="clock-date"> · {life.clock.label.split(' · ').slice(1).join(' · ')}</span></div>}
   </div>;
 }
 
 export type Tab = 'world' | 'messages' | 'feed' | 'profile';
-const TABS: { id: Tab; icon: string; label: string }[] = [
-  { id: 'world', icon: '🌆', label: 'World' },
-  { id: 'messages', icon: '💬', label: 'Messages' },
-  { id: 'feed', icon: '✨', label: 'Feed' },
-  { id: 'profile', icon: '👤', label: 'Profile' },
+const TABS: { id: Tab; Icon: LucideIcon; label: string }[] = [
+  { id: 'world', Icon: MapIcon, label: 'World' },
+  { id: 'messages', Icon: MessageCircleHeart, label: 'Messages' },
+  { id: 'feed', Icon: Flame, label: 'Feed' },
+  { id: 'profile', Icon: UserRound, label: 'Profile' },
 ];
 
-export function BottomNav({ tab, onTab, badges }: { tab: Tab; onTab: (t: Tab) => void; badges?: Partial<Record<Tab, number>> }) {
-  return <nav className="bottom-nav">
-    {TABS.map((t) => <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => onTab(t.id)}>
-      <span className="nav-icon">{t.icon}{badges?.[t.id] ? <i className="nav-badge">{badges[t.id]}</i> : null}</span>
-      <span className="nav-label">{t.label}</span>
-    </button>)}
+export function BottomNav({ tab, onTab, badges, onDiscover }: { tab: Tab; onTab: (t: Tab) => void; badges?: Partial<Record<Tab, number>>; onDiscover?: () => void }) {
+  const button = (t: (typeof TABS)[number]) => <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => onTab(t.id)}>
+    <span className="nav-icon"><t.Icon size={20} strokeWidth={tab === t.id ? 2.5 : 2} aria-hidden="true" />{badges?.[t.id] ? <i className="nav-badge">{badges[t.id]}</i> : null}</span>
+    <span className="nav-label">{t.label}</span>
+  </button>;
+  // Discover is the heart of the game, so it sits raised in the middle of the bar.
+  return <nav className={`bottom-nav ${onDiscover ? 'with-fab' : ''}`}>
+    {TABS.slice(0, 2).map(button)}
+    {onDiscover && <button className="nav-fab" aria-label="Discover people" onClick={onDiscover}><Heart size={26} strokeWidth={0} fill="currentColor" /><span className="sr-only">Discover</span></button>}
+    {TABS.slice(2).map(button)}
   </nav>;
 }
 
@@ -93,7 +126,7 @@ export function Sheet({ title, subtitle, onClose, children }: { title: string; s
     <div className="sheet" role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}>
       <header className="sheet-head">
         <div><h2>{title}</h2>{subtitle && <span>{subtitle}</span>}</div>
-        <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
+        <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} strokeWidth={2.5} /></button>
       </header>
       <div className="sheet-body">{children}</div>
     </div>
@@ -111,7 +144,7 @@ export function EmptyState({ icon = '🫥', title, body, actionLabel, onAction }
 
 export function ErrorState({ title = 'Something went wrong', body, actionLabel = 'Try again', onAction }: { title?: string; body?: string; actionLabel?: string; onAction?: () => void }) {
   return <div className="state-block error">
-    <div className="state-icon">⚠️</div>
+    <div className="state-icon"><TriangleAlert size={34} strokeWidth={2.2} /></div>
     <strong>{title}</strong>
     {body && <p>{body}</p>}
     {onAction && <button className="pill-btn" onClick={onAction}>{actionLabel}</button>}
@@ -180,13 +213,14 @@ export function ProfileCard({ data, actions }: { data: ProfileCardData; actions:
   </article>;
 }
 
-// Minimal presentational invitation card. Full lifecycle lands in M6.
+// Invitation card (spec 11). Lifecycle and actions are decided by `Invites.tsx::InviteCard`.
 export type InvitationState = 'draft' | 'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled';
-export function InvitationCard({ title, state, detail, actions }: { title: string; state: InvitationState; detail?: string; actions?: ProfileCardAction[] }) {
+export function InvitationCard({ title, state, kicker, detail, actions }: { title: string; state: InvitationState; kicker?: string; detail?: string; actions?: ProfileCardAction[] }) {
   return <div className={`invitation-card ${state}`}>
+    {kicker && <span className="invitation-kicker">{kicker}</span>}
     <div className="invitation-head"><strong>{title}</strong><span className={`state-pill ${state}`}>{state}</span></div>
     {detail && <p>{detail}</p>}
-    {actions && actions.length > 0 && <div className="invitation-actions">
+    {actions && actions.length > 0 && <div className={`invitation-actions n${actions.length}`}>
       {actions.map((a) => <button key={a.label} className={a.variant === 'ghost' ? 'ghost' : ''} disabled={a.disabled} onClick={a.onClick}>{a.label}</button>)}
     </div>}
   </div>;

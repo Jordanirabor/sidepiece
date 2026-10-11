@@ -9,7 +9,7 @@ Builds passing does not mean it looks right. This session found back-facing prev
 lighting, a camera blocked by a door, and overlapping panels, and **only screenshots caught them**.
 
 ## Prerequisites
-- Dev stack running: `docker compose -f docker-compose.dev.yml up` (web :3001, api :4000 with `ALLOW_DEV_LOGIN=true`).
+- Dev stack running: `docker compose -f docker-compose.dev.yml up` (web :4001, api :4002 with `ALLOW_DEV_LOGIN=true`).
 - A Chromium binary. Prefer Playwright's headless shell when it exists (a desktop Chrome that's already running can block launch):
   `ls ~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell`
 - `puppeteer-core` is a devDependency of `web/` (`cd web && pnpm install`). Don't install it anywhere else.

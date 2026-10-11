@@ -1,5 +1,7 @@
 mod auth;
 mod chat;
+mod dates;
+mod invites;
 mod life;
 mod matching;
 mod messages;
@@ -137,6 +139,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/messages/send", post(messages::send))
         .route("/v1/messages/read", post(messages::mark_read))
         .route("/v1/messages/control", post(messages::control))
+        .route("/v1/activities", get(invites::list_activities))
+        .route("/v1/invitations", post(invites::create))
+        .route("/v1/invitations/{id}/respond", post(invites::respond))
+        .route("/v1/dates/{id}", get(dates::get_date))
+        .route("/v1/dates/{id}/choose", post(dates::choose))
+        .route("/v1/dates/{id}/leave", post(dates::leave))
         .route("/v1/social/private-room", post(request_private_room))
         .route(
             "/v1/social/private-room/incoming",

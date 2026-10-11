@@ -211,6 +211,11 @@ fn response(life: &LifeRow) -> LifeResponse {
     }
 }
 
+/// Current cash (₦), for affordability checks before something is charged later.
+pub async fn balance(state: &SharedState, player_id: Uuid) -> Result<i32, AppError> {
+    Ok(load(state, player_id).await?.money)
+}
+
 /// Apply a delta (used by actions and by conversations). Fails if the player can't afford it.
 pub async fn apply(
     state: &SharedState,
