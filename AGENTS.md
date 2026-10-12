@@ -1,6 +1,6 @@
 # AGENTS.md: Side Piece
 
-You are working on **Side Piece**: a mobile-first, web-based, **semi-realistic 3D adult (18+) social world set in
+You are working on **Side Piece**: a mobile-first, web-based, **stylized 3D adult (18+) social world set in
 Lagos nightlife**. Players build a character, enter the city, meet compatible people (players + NPCs), chat
 (free-text, scored), agree on dates and private experiences (always consent-gated), and progress
 (₦, XP, reputation, relationships, body count). Tagline: *Same People. New Options.*
@@ -35,7 +35,7 @@ Project skills in `.agents/skills/` load on demand:
   decline, cancel and leave paths. Block hides both ways; report is always reachable. (ADR 0003)
 - **Non-graphic** intimate content (fade-to-black). Language-model output stays non-explicit.
 - **Server is authoritative** for money, XP, needs, relationships, body count, consent state and room access.
-- **Semi-realistic 3D**, not photoreal (ADR 0012, supersedes 0004). Same avatar everywhere. Every 3D canvas goes
+- **Stylized 3D** like MyAbujaLife: Kenney city, Quaternius modular characters (ADR 0017, supersedes 0012). Same avatar everywhere. Every 3D canvas goes
   through `web/src/render.ts` (`createEngine` + `applyCinematicLook`) and respects the `low`/`high` quality tiers.
 - **Design system tokens only** (`docs/product/design-system.md`). No ad-hoc colours or spacing.
 - Never ship or bundle anything from `docs/references/` (third-party, reference-only).
@@ -45,15 +45,19 @@ Project skills in `.agents/skills/` load on demand:
 ```
 apps/api/            Axum HTTP API: auth.rs, chat.rs (NPC LLM chat), life.rs (needs/₦/XP/clock),
                      npcs.rs (NPC catalog), matching.rs, messages.rs (DMs), invites.rs (activity invitations),
-                     dates.rs (date scenes), main.rs (rooms, discovery, social, moderation, routes)
+                     dates.rs (date scenes), encounters.rs (private encounters), feed.rs (personal feed), settings.rs (settings, alerts, unblock), progress.rs (outcome ledger,
+                     feedback, stats, reputation, achievements), main.rs (rooms, discovery, social, moderation, routes)
 apps/room-server/    WebSocket rooms: join tickets, roster, movement, room chat, Redis presence
 apps/event-worker/   NATS events.> → Postgres game_event_audit
-crates/common/       Shared wire types (AvatarLook, ClientEvent/ServerEvent, tiers…). Mirror them in TS.
+crates/common/       Shared wire types (AvatarLook, ClientEvent/ServerEvent, tiers…) and venues.rs (club catalog). Mirror them in TS.
 migrations/          sqlx migrations (run automatically by api/event-worker on start)
 web/src/             main.tsx (app flow), Creator.tsx (4-panel creator), SceneView.tsx (3D world + realtime),
-                     venue.ts (venues + humanoid), look.ts (appearance model/catalogs), Hud.tsx (HUD + NPC chat), api.ts
-                     Messages.tsx (inbox + DM thread), Invites.tsx (suggest sheet + invitation cards), DateScene.tsx
-scripts/             smoke.mjs (API two-player flow; Node built-ins only)
+                     city.ts (open Lagos map), venue.ts (venue interiors + humanoid), venues.ts (club catalog mirror), avatar3d.ts (modular characters), look.ts (appearance model/catalogs), Hud.tsx (HUD + NPC chat), api.ts
+                     Messages.tsx (inbox + DM thread), Invites.tsx (suggest sheet + invitation cards), DateScene.tsx,
+                     Encounter.tsx (private encounter), Outcome.tsx (shared outcome card), Stats.tsx (profile stats + 15A),
+                     Feed.tsx (feed tab), Settings.tsx (settings & privacy sheet)
+scripts/             smoke.mjs (API two-player flow; Node built-ins only); characters/ + world/ (CC0 asset builds, see their READMEs);
+                     blender/ (Lagos city + venue kits from Poly Haven, built headless in Blender)
 web/scripts/         ui-check.mjs (headless browser walkthrough + screenshots; puppeteer-core is a web devDependency)
 docs/                product truth, references, decisions, roadmap
 deploy/dokploy.md    production deploy guide
@@ -67,6 +71,7 @@ cargo fmt && cargo check && cargo test                 # 0 warnings expected
 cd web && pnpm build                                   # type-check + bundle
 node scripts/smoke.mjs                                 # end-to-end API flow (dev stack running)
 cd web && CHROME_PATH=… SHOTS_DIR=/tmp/shots pnpm ui-check   # phone + desktop; then LOOK at the screenshots
+                                                       # UI_ONLY=phone|desktop runs one viewport (busy machine)
 ```
 
 **Definition of done** for any change:

@@ -1,12 +1,13 @@
 //! Email/password accounts with an 18+ age gate.
 //! Passwords are hashed with Argon2id; login attempts are rate limited per email via Redis.
+//! Settings (spec 18) can change the password and delete the account (ADR 0016).
 
-use super::{AppError, SharedState, issue_token, publish_event};
+use super::{AppError, SharedState, issue_token, publish_event, require_player};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::HeaderMap};
 use chrono::{Datelike, NaiveDate, Utc};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
@@ -255,6 +256,149 @@ pub async fn login(
         token,
         has_avatar,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    pub player_id: Uuid,
+    pub current_password: String,
+    pub new_password: String,
+}
+
+pub async fn change_password(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<ApiOk<serde_json::Value>>, AppError> {
+    require_player(&state, &headers, req.player_id)?;
+    check_rate_limit(&state, &format!("password:{}", req.player_id)).await?;
+    let hash: Option<String> =
+        sqlx::query_scalar("select password_hash from accounts where player_id = $1")
+            .bind(req.player_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(hash) = hash else {
+        return Err(AppError::bad_request("this player has no email account"));
+    };
+    if !verify_password(&req.current_password, &hash) {
+        return Err(AppError::forbidden("your current password is incorrect"));
+    }
+    validate_password(&req.new_password)?;
+    if req.new_password == req.current_password {
+        return Err(AppError::bad_request(
+            "choose a password you haven't used here",
+        ));
+    }
+    sqlx::query("update accounts set password_hash = $2 where player_id = $1")
+        .bind(req.player_id)
+        .bind(hash_password(&req.new_password)?)
+        .execute(&state.db)
+        .await?;
+    publish_event(
+        &state,
+        "account.password_changed",
+        Some(req.player_id),
+        None,
+        None,
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(Json(ApiOk::new(serde_json::json!({ "changed": true }))))
+}
+
+#[derive(Deserialize)]
+pub struct DeleteAccountRequest {
+    pub player_id: Uuid,
+    /// Required for email accounts; dev-login players have none.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Must be exactly `DELETE`, so a stray request can't wipe an account.
+    pub confirm: String,
+}
+
+/// Permanently deletes the player and everything that points at them (ADR 0016).
+/// Other players keep their own reward history (stats don't change); reports filed about this player are kept
+/// for safety review.
+pub async fn delete_account(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Result<Json<ApiOk<serde_json::Value>>, AppError> {
+    require_player(&state, &headers, req.player_id)?;
+    if req.confirm != "DELETE" {
+        return Err(AppError::bad_request("type DELETE to confirm"));
+    }
+    check_rate_limit(&state, &format!("delete:{}", req.player_id)).await?;
+    let hash: Option<String> =
+        sqlx::query_scalar("select password_hash from accounts where player_id = $1")
+            .bind(req.player_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some(hash) = hash
+        && !verify_password(req.password.as_deref().unwrap_or(""), &hash)
+    {
+        return Err(AppError::forbidden("your password is incorrect"));
+    }
+
+    let me = req.player_id;
+    let actor = format!("player:{me}");
+    let mut tx = state.db.begin().await?;
+    // Rows other players hold about this one, keyed by the text actor id (no foreign key to cascade).
+    for sql in [
+        "delete from relationship_state where target_id = $1",
+        "delete from player_interests where target_id = $1",
+        "delete from player_passes where target_id = $1",
+        "delete from matches where target_id = $1",
+        "delete from conversation_state where target_id = $1",
+        "delete from player_blocks where target_id = $1",
+        "delete from invitations where target_id = $1",
+        "delete from date_sessions where guest_id = $1",
+        "delete from encounters where guest_id = $1",
+        "delete from private_rooms where target_id = $1",
+        "delete from activity_feedback where from_actor = $1 or to_actor = $1",
+        "delete from game_event_audit where target_id = $1",
+    ] {
+        sqlx::query(sql).bind(&actor).execute(&mut *tx).await?;
+    }
+    sqlx::query("delete from game_event_audit where player_id = $1")
+        .bind(me)
+        .execute(&mut *tx)
+        .await?;
+    // Everything owned by the player (account, avatar, life, messages, invitations sent…) cascades.
+    let deleted = sqlx::query("delete from players where id = $1")
+        .bind(me)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    if deleted == 0 {
+        return Err(AppError::not_found("player not found"));
+    }
+
+    if let Some(redis) = &state.redis {
+        let mut redis = redis.clone();
+        let room: Option<String> = redis.get(format!("player:room:{me}")).await.unwrap_or(None);
+        if let Some(room) = room {
+            let _: redis::RedisResult<()> = redis
+                .srem(format!("room:players:{room}"), me.to_string())
+                .await;
+            let _: redis::RedisResult<()> = redis
+                .hdel(format!("room:names:{room}"), me.to_string())
+                .await;
+        }
+        let _: redis::RedisResult<()> = redis.del(format!("player:room:{me}")).await;
+    }
+    // No player id on the event: the audit row must not re-attach anything to the deleted account.
+    publish_event(
+        &state,
+        "account.deleted",
+        None,
+        None,
+        None,
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(Json(ApiOk::new(serde_json::json!({ "deleted": true }))))
 }
 
 #[cfg(test)]

@@ -49,6 +49,25 @@ Weights: body 500/600/750, display 700/800/900. Micro-labels are uppercase 11px 
   - **Navigation:** the Back/Next bar sticks to the bottom of the screen.
   - **Buttons:** the mockup's `[ NEXT ]` brackets are gone; buttons are pills with lucide arrows.
 
+## Venue neon palette (3D only, ADR 0019)
+
+Club signs, beacons, searchlights, facade LEDs and interior accents use only these colours. Each club in
+`web/src/venues.ts` has a `color` (sign, LEDs, main light) and an `accent` (second light, back-bar panel).
+
+| Hex | Name | Notes |
+|---|---|---|
+| `#ff2f91` | hot pink | = `--hot-pink` |
+| `#22d3ee` | neon cyan | deeper than `--neon-cyan`, which stays the UI colour for other players |
+| `#a855f7` | violet | |
+| `#ffb02e` | amber | |
+| `#f5c542` | gold | Quilox, Stage Lagos accent |
+| `#ff5c7a` | coral | = `--accent` |
+| `#ff4d5e` | red | = `--danger` (fine in 3D, never as a UI signal) |
+| `#3a7bd5` | blue | start of `--primary-grad` |
+| `#4cbf8a` | green | = `--success` |
+
+Paint tints for buildings (`TINTS` in `web/src/city.ts`) are material colours, not UI tokens.
+
 ## Form fields (v2.3, 2026-10-11)
 
 - **`Field`** (`ui.tsx`): one rounded box with a 40px icon bubble and a floating label. On focus the bubble turns

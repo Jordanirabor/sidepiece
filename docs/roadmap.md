@@ -116,30 +116,60 @@ compatible → match → chat → agree on an activity → experience the scene 
 
 > Carry-overs: seated pose for date avatars; more scene scripts; ₦ rewards + partner feedback on the outcome (M7, Screen 14); private-room encounter content (M7, Screen 13); realtime push for beat sync (ADR 0011/0013 "revisit when").
 
-## M7: Encounters, outcomes & progression  *(spec 13, 14, 15, 15A. ADR 0003)*
-- [ ] Private encounter: both confirm → non-graphic scene / fade-to-black. Skip/Leave is always visible.
-- [ ] Outcome screen: ₦ earned, reputation, optional feedback.
-- [ ] Server-side **body count (unique partners)**, total encounters, achievements, reputation.
-- [ ] Profile & stats screen, with public/private stat toggles.
+## M7: Encounters, outcomes & progression  *(spec 13, 14, 15, 15A. ADR 0003, 0014)* — ✅ done
+- [x] Private encounter: every accepted private room holds one; both confirm again inside ("I'm ready" / "Not tonight") → ~14 s non-graphic scene that fades to black. Leave (confirmed, no penalty) and Skip always visible. NPCs consent from Friend tier, now enforced for world-level NPC rooms too.
+- [x] Outcome screen shared by dates and encounters: ₦, XP, reputation and relationship changes, unlocked achievements, the partner's feedback. Optional positive-only feedback, skippable, never changes rewards.
+- [x] Server-side **body count (unique partners)**, total encounters, dates, matches, friends, lifetime ₦ earned/spent, reputation (0–10, nothing lowers it), level titles, 8 achievements (none about body count) with one-time ₦ rewards.
+- [x] Profile stat card (Screen 15) and Detailed stats sheet (15A) with public/private toggles. Body count and encounters are private by default; cash is never public. Others see only public stats (Discover detail, DM profile, Nearby rating).
 
-**Accept:**
-- Rewards can't be duplicated by replaying requests (idempotent).
-- Stats match the spec's definitions (e.g. 3 encounters with 1 partner = body count 1, total 3).
+**Accept:** ✅ rewards can't be duplicated: one ledger row per (activity, player), and smoke replays `complete`, double feedback and a second accept. ✅ Smoke: 3 encounters with 1 partner = body count 1, total 3; a repeat inside 24 h pays nothing; leave before the scene ends it for both with no outcome; outsiders and blocked pairs get 404; visibility toggles change what others see; an NPC you barely know won't agree to a private room. ui-check drives date outcome + feedback → private invite → encounter consent → scene → Skip → outcome → detailed stats → profile at both viewports. 46 Rust tests (39 api + 7 common), 0 warnings.
 
-## M8: Polish & breadth  *(spec 16, 18, 06A)*
-- [ ] Feed built from `game_event_audit`.
-- [ ] Settings & privacy, including the blocked list, account deletion and notifications.
+> Also fixed: taking a turn (date choice, encounter confirm/complete) now counts as presence. A partner acting without polling used to be shown as "dropped off" after 25 s (it made the desktop ui-check flaky).
+
+> Also fixed: a finished date or encounter could be read a moment before its rewards were written. Polling stopped on `completed`, so the outcome panel stayed empty. Clients now keep polling until the outcome arrives ("Wrapping up…" meanwhile).
+
+> Known, pre-existing (verified on the M6 client): a Babylon `Cannot read properties of null (reading 'program')` page error after closing Discover / the creator (engine disposal race in a `Preview` canvas). Harmless to the flow; to fix in M8's states audit.
+
+> Carry-overs: embrace/seated animations (art pipeline), more encounter and date scripts, Feed items from `achievement.unlocked` / `encounter.completed` / `feedback.given` (M8), realtime push for encounter sync (ADR 0011).
+
+## M8: Polish & breadth  *(spec 16, 18, 06A)* — in progress
+- [x] Feed built from `game_event_audit` (ADR 0015): personal-only items that link to chat / stats / venues, rotating world posts from NPCs and venues, nav badge. Smoke: items appear for the right side only, other players never see your activity, blocks remove people, opening clears the badge.
+- [x] Settings & privacy (ADR 0016): account (email, change password), character visibility, discovery prefs, in-app alerts stored server-side, blocked list with unblock, privacy/help, sign out, account deletion (password + `DELETE`) that cleans both sides. Smoke: alerts persist, only the blocker can unblock, wrong/short passwords rejected, old password stops working, deletion needs the word and password, a deleted session can't restore or sign in, matches/messages/blocks disappear for the other side, the email is reusable.
 - [ ] Location details panel.
 - [ ] More NPCs; venues feel populated (ambient NPCs).
 - [ ] Universal screen states audit (loading/empty/error/offline everywhere).
 
 ## Parallel tracks (need client decisions)
 
-- **Art pipeline** (ADR 0012, decided 2026-10-10: semi-realistic, open-licence assets):
-  - [x] Phase 1 rendering: filmic post-processing, key shadows + contact shadows, wet-floor reflections, procedural textured surfaces with normal maps, low/high quality tiers (`web/src/render.ts`).
-  - [x] Phase 2 characters (interim): 9 Microsoft Rocketbox (MIT) base models → glTF (`web/src/avatar3d.ts`, `scripts/avatars/`), nearest base by gender/skin/outfit + hair tint, body scale, head-bone accessories; idle/walk blending; 512px variants for phones/portraits; primitive humanoid as fallback. Outfit/clothing colour don't visibly change the model yet.
-  - [ ] **Pinned (owner, 2026-10-11): fully parametric creator** (one base body with morphs, continuous skin tone, swappable hair/clothes). Recommended route: MakeHuman/MPFB2 (CC0) authored in Blender, which the owner will install. Rocketbox stays until then.
-  - [ ] Phase 3 props: CC0 furniture and venue dressing (e.g. Poly Haven).
+- **Art pipeline** (ADR 0017, decided 2026-10-12: stylized like MyAbujaLife, CC0 kits now, Blender later; supersedes 0012):
+  - [x] Rendering tiers (from 0012): filmic post-processing, shadows, contact shadows, low/high quality (`web/src/render.ts`).
+  - [x] **Open Lagos city** (`web/src/city.ts`, Kenney CC0 kits → `public/world/kit.glb`). The map is 48×32 tiles of 11 m (≈530×350 m, about 100× the old street):
+    - VI towers, Ikoyi houses, the Lekki Phase 1 estates and Admiralty Way, the lagoon, the Link Bridge with night lights, the beach and the sea.
+    - Auto-tiled streets, buildings facing their street, palms, parked cars and traffic with danfo buses.
+    - Thin instances, collision with slide, Shift/joystick-rim running, and the sun following the game clock (readable moonlit nights, lamp pools, neon venue signs).
+  - [x] **Modular characters** (`web/src/avatar3d.ts`, Quaternius CC0 → `public/characters/`):
+    - One rig per frame; head, top, bottom and shoes swap freely.
+    - Skin, hair, top and bottom are recoloured per character.
+    - Afro, puffs and locs are procedural volumes on the head bone.
+    - Idle/walk/run blend.
+    - The creator offers hair styles, a build choice for non-binary players, shoes, and top/bottom colours. Every option is visible.
+    - `AvatarLook` gains `hair_style`, `shoes`, `top_color` and `bottom_color` (validated server-side), and old looks still render. Rocketbox removed.
+  - [x] **Realistic city (ADR 0018/0019, owner 2026-10-12)**: Blender 5.2 + Poly Haven CC0 pipeline (`scripts/blender/`).
+    - **Buildings:** Lekki duplexes (compound walls, gates, tanks on stands, tile roofs), apartment blocks (balconies, AC units, rooftop tanks), shophouses (shutters), VI curtain-wall towers. The night windows show lit rooms.
+    - **Streets and greenery:** asphalt, markings, kerbs and herringbone paving; palms with bark and frond cut-outs; hedge bushes; Poly Haven street lamps.
+    - **Ground:** textured grass, sand and plaza.
+  - [x] **14 real Lagos clubs** at their real streets, with real street names, a Go-out sheet with Walk / Ride there (fast travel), and exiting at the club's door (ADR 0019, `product/lagos-clubs.md`). Smoke: every catalog venue is joinable, unknown kinds are refused.
+  - [x] **Venue interiors** from the same pipeline (`world/venues.glb`): club/lounge, rooftop and beach rooms, with per-club neon colours and furniture collision.
+  - [ ] **Characters, semi-realistic (ADR 0018, next):** MPFB2 bodies with face and body morph sliders and textured skin.
+  - [ ] Private room and date-scene props in the new style; seated poses.
+  - [ ] Ambient crowds in clubs and on club streets; NPC hosts for the 10 new clubs.
+  - [ ] Mainland district (Ikeja: Cubana, Rumours, Rhapsody's) across the Third Mainland Bridge.
+  - [ ] Legal review or venue permission for real club names before public launch (ADR 0019).
+  - [ ] Landmarks in Blender (Lekki Toll Gate, Eko Atlantic, National Theatre). Palette pass done (painted plaster tints, clay and stone-coated roofs).
+  - [ ] City map sheet (fast travel is done: Ride there); ambient pedestrians; seated, dance and wave animations in scenes.
+  - [x] Movement and camera pass (owner feedback, 2026-10-12): tap/click a person, a door or a building to walk there by street route (people and doors open on arrival); Walk/Run/Sprint pace in the dock; smooth turning; the camera follows rigidly and can't pan away (fixed swinging, circling and pulsing); loading veil and model prefetch (no placeholder flash); balanced exposure; SSAO on high; chunked thin instances.
+  - [x] Nightlife pass: the city is always after dark, with restrained neon, venue searchlights and colour spill, plaza party lights and a purple night grade. Clubs are findable: you arrive facing them, each has a floating neon name, and the **Go out** sheet's "Take me there" walks you in.
+  - [ ] Real-phone performance check in the city (headless fps is meaningless).
 - **Interface refresh v2** (design-system.md, 2026-10-11): Bricolage Grotesque + Plus Jakarta Sans + Caveat accents, lucide icons, glass surfaces, aurora backgrounds, poster-style welcome (floating notifications, sticky note, ticker) and auth, profile hero/tiles with "Meet someone new" first, story row in Messages, full-bleed Discover cards, floating capsule nav with a raised Discover button (compact and centred on desktop).
 - **Language-model provider** (ADR 0005): choose a provider and model, then set `LLM_*` in Dokploy.
 - **Age verification** before public launch (ADR 0003).

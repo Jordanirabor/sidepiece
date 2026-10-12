@@ -1,5 +1,8 @@
 # 0012: Semi-realistic art direction (supersedes 0004)
 
+> **Superseded by [0017](0017-stylized-city-and-modular-characters.md) (2026-10-12):** the owner moved to a stylized look
+> (MyAbujaLife as the bar). The `render.ts` pipeline and quality tiers below still apply; Rocketbox was removed.
+
 **Context.** ADR 0004 chose stylized 3D because the spec says "stylized" and cites Synty/Sims/Paralives art. The
 client's own gameplay screenshot (`references/whatsapp/03`, `06`) and creator videos show skinned, realistic-ish
 humans in a furnished, softly lit venue. Our primitive avatars and flat-shaded venues were reviewed on 2026-10-10

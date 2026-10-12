@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod venues;
+
 pub type PlayerId = Uuid;
 pub type RoomId = String;
 
@@ -164,6 +166,7 @@ pub fn validate_avatar(mut a: AvatarConfig) -> Result<AvatarConfig, String> {
         }
     };
     check(&mut a.likes, PARTNER_TRAITS, MAX_LIKES, "likes")?;
+    a.look.validate()?;
     let p = &mut a.preferences;
     if !p.relationship_style.is_empty()
         && !RELATIONSHIP_STYLES.contains(&p.relationship_style.as_str())
@@ -314,6 +317,9 @@ pub struct DiscoverableProfile {
     /// In a venue right now (`location` then names it).
     #[serde(default)]
     pub online: bool,
+    /// Players only: the stats they made public.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<PublicStats>,
 }
 
 /// Spec Screen 07: Like/Pass deck. Players first; NPCs fill in when players run out.
@@ -407,6 +413,9 @@ pub struct DmThreadResponse {
     /// Activity invitations between the two players, oldest first (spec Screen 11, shown in-chat).
     #[serde(default)]
     pub invitations: Vec<InvitationView>,
+    /// The stats the other player made public.
+    #[serde(default)]
+    pub stats: PublicStats,
 }
 
 /// An activity a player can propose (spec Screen 10). Ids double as boundary types (`INVITATION_TYPES`).
@@ -451,6 +460,9 @@ pub struct InvitationView {
     /// Short explanation, e.g. why an NPC said not yet.
     #[serde(default)]
     pub note: Option<String>,
+    /// Encounter in the private room (accepted private location).
+    #[serde(default)]
+    pub encounter_id: Option<Uuid>,
 }
 
 /// One resolved beat of a date: what each side said and how the vibe moved.
@@ -463,13 +475,44 @@ pub struct DateLine {
     pub delta: i32,
 }
 
+/// Positive-only feedback tags (spec 14: optional, never forced, never changes rewards).
+pub const FEEDBACK_TAGS: &[&str] = &[
+    "Great vibe",
+    "Respectful",
+    "Funny",
+    "Good listener",
+    "Would meet again",
+];
+
+/// Spec Screen 14: what one participant got from a finished date or encounter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateOutcome {
+pub struct ActivityOutcome {
+    pub source_id: Uuid,
+    /// "date" or "encounter".
+    pub kind: String,
     pub label: String,
     pub summary: String,
+    pub partner_id: String,
+    pub partner_name: String,
+    /// ₦ earned.
+    pub money: i32,
     pub xp: i32,
     pub affinity: i32,
+    /// Change in social reputation (0-10 scale).
+    pub reputation_delta: f32,
     pub objective_met: bool,
+    /// A repeat inside the reward cooldown: it still counts in stats but pays nothing.
+    #[serde(default)]
+    pub repeat: bool,
+    /// Labels of achievements this unlocked.
+    #[serde(default)]
+    pub achievements: Vec<String>,
+    /// Tags this player gave, once submitted.
+    #[serde(default)]
+    pub my_feedback: Option<Vec<String>>,
+    /// Tags the partner gave this player, once they submitted.
+    #[serde(default)]
+    pub their_feedback: Option<Vec<String>>,
 }
 
 /// Date / shared scene state (spec Screen 12), from the viewer's side.
@@ -502,8 +545,207 @@ pub struct DateView {
     pub status: String,
     pub left_by_me: bool,
     pub partner_present: bool,
+    /// Set once completed (spec Screen 14).
     #[serde(default)]
-    pub outcome: Option<DateOutcome>,
+    pub outcome: Option<ActivityOutcome>,
+}
+
+/// Private encounter (spec Screen 13), from the viewer's side. Lifecycle: waiting (both confirm) → playing
+/// (non-graphic scene) → completed, or left by either side at any point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncounterView {
+    pub id: Uuid,
+    pub room_id: String,
+    pub partner_id: String,
+    pub partner_name: String,
+    /// "player" or "npc".
+    pub partner_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner_look: Option<AvatarLook>,
+    /// `waiting`, `playing`, `completed` or `left`.
+    pub status: String,
+    pub i_confirmed: bool,
+    pub partner_confirmed: bool,
+    pub partner_present: bool,
+    pub left_by_me: bool,
+    /// Seconds since both confirmed, so both clients play the scene in step.
+    #[serde(default)]
+    pub elapsed_secs: Option<f64>,
+    /// Length of the scene before it fades to the outcome.
+    pub scene_secs: i32,
+    #[serde(default)]
+    pub outcome: Option<ActivityOutcome>,
+}
+
+/// One line in the feed (spec Screen 16). Every item links somewhere via `action`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedItem {
+    pub id: String,
+    /// match | invitation | date | encounter | achievement | level | feedback | npc | venue
+    pub kind: String,
+    pub icon: String,
+    pub title: String,
+    pub body: String,
+    pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub action_label: Option<String>,
+    /// "chat:<target>", "npc:<id>", "stats" or "venue:<kind>".
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Newer than the last time this player opened the feed.
+    #[serde(default)]
+    pub new: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedResponse {
+    pub items: Vec<FeedItem>,
+    /// Personal items not seen yet (world posts never count).
+    pub unseen_count: i64,
+}
+
+/// Which stats other players can see (spec 15A). Cash is always private.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct StatVisibility {
+    #[serde(default = "yes")]
+    pub level: bool,
+    #[serde(default = "yes")]
+    pub reputation: bool,
+    #[serde(default = "yes")]
+    pub achievements: bool,
+    #[serde(default)]
+    pub body_count: bool,
+    #[serde(default)]
+    pub encounters: bool,
+}
+
+impl Default for StatVisibility {
+    fn default() -> Self {
+        Self {
+            level: true,
+            reputation: true,
+            achievements: true,
+            body_count: false,
+            encounters: false,
+        }
+    }
+}
+
+/// What another player may see of someone's stats: only what they made public.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PublicStats {
+    #[serde(default)]
+    pub level: Option<i32>,
+    #[serde(default)]
+    pub level_title: Option<String>,
+    #[serde(default)]
+    pub reputation: Option<f32>,
+    #[serde(default)]
+    pub achievements: Option<i64>,
+    #[serde(default)]
+    pub body_count: Option<i64>,
+    #[serde(default)]
+    pub encounters: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementView {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub icon: String,
+    /// ₦ paid once on unlock.
+    pub reward: i32,
+    #[serde(default)]
+    pub unlocked_at: Option<DateTime<Utc>>,
+}
+
+/// One part of the reputation score, so players can see how it's made.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReputationPart {
+    pub label: String,
+    pub value: f32,
+    pub max: f32,
+}
+
+/// Feedback received, for the rating history (spec 15A).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackView {
+    pub from_name: String,
+    pub activity: String,
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Spec Screens 15 and 15A: the player's own record. Computed server-side from completed activities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerStats {
+    pub level: i32,
+    pub level_title: String,
+    pub next_title: Option<String>,
+    pub xp: i32,
+    pub xp_into_level: i32,
+    pub xp_for_next: i32,
+    pub money: i32,
+    pub cash_earned: i64,
+    pub cash_spent: i64,
+    pub reputation: f32,
+    pub reputation_parts: Vec<ReputationPart>,
+    /// Unique partners from qualifying completed encounters.
+    pub body_count: i64,
+    /// Qualifying completed encounters, repeats included.
+    pub total_encounters: i64,
+    pub dates_completed: i64,
+    pub matches: i64,
+    pub connections: i64,
+    pub achievements: Vec<AchievementView>,
+    pub feedback: Vec<FeedbackView>,
+    pub visibility: StatVisibility,
+}
+
+/// In-app alerts a player wants (spec 18). Side Piece has no push or email yet; these control the nav badges,
+/// pop-ups and toasts. Consent requests that need an answer are always shown.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct NotificationPrefs {
+    #[serde(default = "yes")]
+    pub messages: bool,
+    #[serde(default = "yes")]
+    pub matches: bool,
+    #[serde(default = "yes")]
+    pub invitations: bool,
+    #[serde(default = "yes")]
+    pub feed: bool,
+}
+
+impl Default for NotificationPrefs {
+    fn default() -> Self {
+        Self {
+            messages: true,
+            matches: true,
+            invitations: true,
+            feed: true,
+        }
+    }
+}
+
+/// Someone this player blocked, for the Settings list (unblock lives there).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockedEntry {
+    /// `player:<uuid>` or `npc:<id>`.
+    pub target_id: String,
+    pub display_name: String,
+    pub kind: String,
+    pub blocked_at: DateTime<Utc>,
+}
+
+/// Settings & privacy (spec 18): the account summary, alerts and the blocked list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsResponse {
+    /// `None` for dev-login players, who have no email account (and no password to change).
+    pub email: Option<String>,
+    pub member_since: DateTime<Utc>,
+    pub notifications: NotificationPrefs,
+    pub blocked: Vec<BlockedEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -550,6 +792,9 @@ pub struct InterestResult {
 pub struct PrivateRoomResult {
     pub room: RoomSummary,
     pub consent_state: String,
+    /// The encounter in this room once accepted (spec Screen 13).
+    #[serde(default)]
+    pub encounter_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,6 +880,12 @@ pub struct AvatarLook {
     pub accessory: String,
     /// "streetwear" | "classic" | "glam"
     pub style: String,
+    /// Modular character parts (ADR 0017). Empty means "derive from the legacy fields" so old looks still render.
+    pub hair_style: String,
+    pub shoes: String,
+    /// `#rrggbb` overrides for the top and bottom; empty keeps the item's own colour.
+    pub top_color: String,
+    pub bottom_color: String,
 }
 
 impl Default for AvatarLook {
@@ -650,7 +901,50 @@ impl Default for AvatarLook {
             bottom: "jeans".into(),
             accessory: "none".into(),
             style: "streetwear".into(),
+            hair_style: String::new(),
+            shoes: String::new(),
+            top_color: String::new(),
+            bottom_color: String::new(),
         }
+    }
+}
+
+impl AvatarLook {
+    /// Look ids are short catalog slugs and colours are `#rrggbb` (or empty for "default").
+    pub fn validate(&self) -> Result<(), String> {
+        let slug = |v: &str| {
+            v.len() <= 32
+                && v.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
+        let hex = |v: &str| {
+            v.is_empty()
+                || (v.len() == 7
+                    && v.starts_with('#')
+                    && v[1..].bytes().all(|b| b.is_ascii_hexdigit()))
+        };
+        for (what, v) in [
+            ("top", &self.top),
+            ("bottom", &self.bottom),
+            ("accessory", &self.accessory),
+            ("style", &self.style),
+            ("hair style", &self.hair_style),
+            ("shoes", &self.shoes),
+        ] {
+            if !slug(v) {
+                return Err(format!("unknown {what}"));
+            }
+        }
+        for (what, v) in [
+            ("hair colour", &self.hair_color),
+            ("top colour", &self.top_color),
+            ("bottom colour", &self.bottom_color),
+        ] {
+            if !hex(v) {
+                return Err(format!("{what} must be a #rrggbb colour"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -677,9 +971,29 @@ mod tests {
         assert_eq!(cfg.look, AvatarLook::default());
     }
 
+    #[test]
+    fn stat_visibility_defaults_keep_sensitive_stats_private() {
+        // Empty settings rows (and partial ones) load with body count and encounters private.
+        let empty: StatVisibility = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty, StatVisibility::default());
+        assert!(empty.level && empty.reputation && !empty.body_count && !empty.encounters);
+        let partial: StatVisibility =
+            serde_json::from_value(serde_json::json!({ "body_count": true })).unwrap();
+        assert!(partial.body_count && partial.level && !partial.encounters);
+    }
+
     fn avatar(gender: &str) -> AvatarConfig {
         serde_json::from_value(serde_json::json!({ "display_name": "Test", "gender": gender }))
             .unwrap()
+    }
+
+    #[test]
+    fn notification_prefs_default_on_for_old_rows() {
+        let prefs: NotificationPrefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs, NotificationPrefs::default());
+        assert!(prefs.messages && prefs.matches && prefs.invitations && prefs.feed);
+        let partial: NotificationPrefs = serde_json::from_str(r#"{"feed":false}"#).unwrap();
+        assert!(!partial.feed && partial.messages);
     }
 
     #[test]
@@ -766,6 +1080,35 @@ mod tests {
             player_compatibility(&a, &b),
             player_compatibility(&b, &a),
             "symmetric"
+        );
+    }
+
+    #[test]
+    fn looks_keep_old_rows_and_reject_junk() {
+        // A look saved before modular characters still loads, with empty part fields.
+        let old: AvatarLook = serde_json::from_str(
+            r##"{"gender":"female","top":"dress_red","hair_color":"#1a1110"}"##,
+        )
+        .unwrap();
+        assert_eq!(old.hair_style, "");
+        assert!(old.validate().is_ok());
+        let mut look = AvatarLook {
+            hair_style: "afro".into(),
+            shoes: "heels".into(),
+            top_color: "#ff2f91".into(),
+            ..AvatarLook::default()
+        };
+        assert!(look.validate().is_ok());
+        look.top_color = "red; drop".into();
+        assert!(look.validate().is_err(), "colours must be #rrggbb");
+        look.top_color = String::new();
+        look.hair_style = "<script>".into();
+        assert!(look.validate().is_err(), "ids are slugs");
+        let mut a = avatar("female");
+        a.look.bottom_color = "#12345".into();
+        assert!(
+            validate_avatar(a).is_err(),
+            "validate_avatar checks the look"
         );
     }
 }

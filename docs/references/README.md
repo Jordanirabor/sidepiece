@@ -84,10 +84,11 @@ The spec asks for **"stylized 3D"** throughout, a premium playful nightlife game
 
 ## Distilled art direction
 
-- **Semi-realistic 3D, adult, fashionable, Black/African-forward cast, Lagos nightlife** (ADR 0012, superseding
-  the earlier "stylized" target). Aim for the client's own gameplay screenshot (`whatsapp/06`) and Sims 4-level
-  fidelity: real proportions, skinned characters, filmic night lighting. Not photoreal and not chibi. The stylized
-  references below are still useful for layout, mood and UI, but not for fidelity.
-- **Small, lively, populated spaces** (rooftop, lounge, club, apartment) beat a large empty open world.
+- **Stylized 3D diorama, adult, fashionable, Black/African-forward cast, Lagos** (ADR 0017, superseding 0012's
+  semi-realism on 2026-10-12). The owner's bar is [MyAbujaLife](https://myabujalife.com): a clean low-poly city in
+  soft light, built to scale, with modular residents. The stylized references below are on target again. The
+  client's semi-realistic poster and videos are still the authority for mood, cast and UI, but not for fidelity.
+- **A real city to roam, then lively venues inside it.** An open Lagos (VI, Ikoyi, Lekki, the Link Bridge, the beach)
+  with small, populated interiors (rooftop, lounge, club, apartment).
 - **Night palette:** deep plum and navy, violet primary, hot pink and coral accents, neon cyan highlights, warm amber practical lights.
 - **One avatar everywhere:** the same character in creator, world, cards, chat headers and dates.

@@ -5,16 +5,16 @@ import { applyCinematicLook, createEngine, disposeEngine } from './render';
 import { buildVenue, material } from './venue';
 import { makeAvatar } from './avatar3d';
 import { DEFAULT_LOOK, Look } from './look';
+import { ActivityOutcome, OutcomeCard } from './Outcome';
 
 /** Mirrors `DateView` in `crates/common` (spec Screen 12). */
 export type DateLine = { beat: number; prompt: string; mine: string; theirs: string; delta: number };
-export type DateOutcome = { label: string; summary: string; xp: number; affinity: number; objective_met: boolean };
 export type DateView = {
   id: string; scene: string; title: string; venue: string; objective: string;
   partner_id: string; partner_name: string; partner_kind: 'player' | 'npc'; partner_look?: Look;
   beat: number; beats_total: number; prompt: string; choices: string[]; my_choice?: number | null; partner_ready: boolean;
   chemistry: number; chemistry_goal: number; history: DateLine[];
-  status: 'active' | 'completed' | 'left'; left_by_me: boolean; partner_present: boolean; outcome?: DateOutcome | null;
+  status: 'active' | 'completed' | 'left'; left_by_me: boolean; partner_present: boolean; outcome?: ActivityOutcome | null;
 };
 
 /** Where the table goes in each venue: open floor with the venue's signature backdrop behind it. */
@@ -96,7 +96,7 @@ function DateStage({ venue, myLook, partnerLook, warmth }: { venue: string; myLo
     engine.runRenderLoop(() => {
       const dt = Math.min(engine.getDeltaTime() / 1000, 0.1);
       const t = performance.now() / 1000;
-      v.animate(t);
+      v.animate(t, dt);
       candleLight.intensity = 0.95 + Math.sin(t * 9) * 0.05;
       camera.alpha = -Math.PI / 2 + Math.sin(t * 0.12) * 0.12;
       // Lean in with chemistry (0..1): the gap narrows from 68 cm to 52 cm.
@@ -126,10 +126,11 @@ function Meter({ value, goal }: { value: number; goal: number }) {
  * a visible Leave button, and the objective. Partner drop-off and partner leaving get neutral recovery.
  */
 export function DateScene({
-  date, myLook, busy, onChoose, onLeave, onDone,
+  date, myLook, busy, feedbackBusy, onChoose, onLeave, onDone, onFeedback, onStats,
 }: {
-  date: DateView; myLook: Look; busy: boolean;
+  date: DateView; myLook: Look; busy: boolean; feedbackBusy: boolean;
   onChoose: (choice: number) => void; onLeave: () => void; onDone: () => void;
+  onFeedback: (tags: string[]) => void; onStats: () => void;
 }) {
   const last = date.history[date.history.length - 1];
   const waiting = date.status === 'active' && date.my_choice != null;
@@ -149,17 +150,17 @@ export function DateScene({
     </div>
 
     <div className="date-panel">
-      {date.status === 'completed' && date.outcome && <div className="date-outcome">
-        <span className="date-kicker">{date.outcome.objective_met ? 'Objective met' : 'Date complete'}</span>
-        <h3>{date.outcome.label}</h3>
-        <p>{date.outcome.summary}</p>
-        <div className="pill-row tight">
-          <span className="pill good">+{date.outcome.xp} XP</span>
-          <span className="pill good">+{date.outcome.affinity} with {date.partner_name}</span>
-          <span className="pill">Chemistry {date.chemistry}/{date.chemistry_goal}</span>
-        </div>
-        <button className="cta" onClick={onDone}>Continue</button>
-      </div>}
+      {date.status === 'completed' && date.outcome && <OutcomeCard
+        outcome={date.outcome}
+        kicker={date.outcome.objective_met ? 'Objective met' : 'Date complete'}
+        sending={feedbackBusy}
+        onFeedback={onFeedback}
+        onContinue={onDone}
+        continueLabel={date.partner_kind === 'player' ? 'Continue to chat' : 'Continue'}
+        onStats={onStats}
+      />}
+
+      {date.status === 'completed' && !date.outcome && <p className="date-wait">Wrapping up<span className="dots"><i /><i /><i /></span></p>}
 
       {date.status === 'left' && <div className="date-outcome">
         <span className="date-kicker">Date ended</span>

@@ -112,6 +112,7 @@ fn npc_profile(npc: &npcs::Npc, likes: &[String]) -> DiscoverableProfile {
         open_to: INVITATION_TYPES.iter().map(|t| t.to_string()).collect(),
         look: Some(npc.look()),
         online: true,
+        stats: None,
     }
 }
 
@@ -172,6 +173,10 @@ pub async fn deck(
     // Online people first (you can actually go meet them), then by compatibility (stable sort).
     players.sort_by_key(|p| !p.online);
     players.truncate(limit);
+    for card in &mut players {
+        let id = Uuid::parse_str(&card.id["player:".len()..]).unwrap_or_default();
+        super::progress::attach_public_stats(&state, card, id).await?;
+    }
     let fallback = players.is_empty();
 
     let mut npc_cards: Vec<DiscoverableProfile> = npcs::NPCS

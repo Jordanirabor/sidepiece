@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Login, Room, SceneNpc, SceneView } from './SceneView';
+import { Login, Room, SceneNpc, SceneView, Speed, SPEEDS } from './SceneView';
 import { Creator, Identity, Preview } from './Creator';
 import { Life, NpcChat, Thread } from './Hud';
 import { BottomNav, BrandLogo, ConfirmDialog, DialogSpec, EmptyState, Field, ProfileCard, Sheet, Tab, TierMeter, ToastView, TopBar, naira } from './ui';
-import { ArrowLeft, ArrowRight, AtSign, Cake, Eye, EyeOff, Heart, LockKeyhole, LogOut, Mail, Shirt, SlidersHorizontal, Sparkles, Star, Users, Wallet } from 'lucide-react';
+import { ArrowLeft, ArrowRight, AtSign, CarTaxiFront, Cake, Eye, EyeOff, Footprints, Heart, LockKeyhole, LogOut, Mail, MapPin, Settings as SettingsIcon, Shirt, SlidersHorizontal, Sparkles, Users, Wind, Zap } from 'lucide-react';
 import { api, ApiError } from './api';
 import { DEFAULT_LOOK, Look } from './look';
 import { DEFAULT_PREFERENCES, INTENTS, INVITATION_TYPES, labelOf, Preferences, RELATIONSHIP_STYLES, SHOW_ME } from './prefs';
@@ -13,6 +13,18 @@ import { Discover, Match, MatchMoment } from './Discover';
 import { DmChat, DmProfileSheet, DmThread, Inbox, MessagesPanel } from './Messages';
 import { Activity, Invitation, SuggestSheet } from './Invites';
 import { DateScene, DateView } from './DateScene';
+import { EncounterScene, EncounterView } from './Encounter';
+import { ActivityOutcome } from './Outcome';
+import { PlayerStats, PublicStats, StatVisibility, StatsHero, StatsSheet } from './Stats';
+import { Feed, FeedPanel } from './Feed';
+import { BlockedEntry, DEFAULT_ALERTS, NotificationPrefs, Settings, SettingsSheet } from './Settings';
+import { prefetchCharacters } from './avatar3d';
+import { CLUBS } from './venues';
+
+
+// Start the big 3D downloads while the player signs in, so the world and its people appear without a pop-in.
+prefetchCharacters();
+['/world/kit.glb', '/world/lagos.glb', '/world/venues.glb'].forEach((u) => fetch(u).catch(() => {}));
 // Self-hosted, OFL-licensed fonts (design-system.md → Typography). Bundled by Vite; no font CDN at runtime.
 import '@fontsource-variable/bricolage-grotesque';
 import '@fontsource-variable/plus-jakarta-sans';
@@ -24,8 +36,8 @@ type Session = { player_id: string; display_name: string; token: string; has_ava
 type AvatarConfig = { display_name: string; gender: string; likes: string[]; look: Look; match_code: string; bio?: string; intent?: string; preferences?: Partial<Preferences> };
 type RoomJoinTicket = { ticket: string };
 type NpcPresence = { x: number; z: number; look: Look; tagline: string };
-type Profile = { id: string; display_name: string; kind: 'npc' | 'player'; looking_for: string; compatibility: number; social_rating: number; npc?: NpcPresence; bio?: string; interests?: string[]; relationship_style?: string | null; open_to?: string[] };
-type PrivateRoomResult = { consent_state: string; room: Room };
+type Profile = { id: string; display_name: string; kind: 'npc' | 'player'; looking_for: string; compatibility: number; social_rating: number; npc?: NpcPresence; bio?: string; interests?: string[]; relationship_style?: string | null; open_to?: string[]; stats?: PublicStats };
+type PrivateRoomResult = { consent_state: string; room: Room; encounter_id?: string | null };
 type IncomingRequest = { room_id: string; from_player_id: string; from_display_name: string };
 type Stats = { attraction: number; trust: number; reputation: number; affinity: number };
 type PlayerState = { avatar?: AvatarConfig | null; relationships: { target_id: string; stats: Stats }[] };
@@ -79,6 +91,15 @@ function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [playerState, setPlayerState] = useState<PlayerState>();
   const [life, setLife] = useState<Life>();
+  // Movement pace, remembered on this device (a per-viewer convenience, not game state).
+  const [speed, setSpeed] = useState<Speed>(() => {
+    try { const v = localStorage.getItem('sidepiece_speed'); return SPEEDS.includes(v as Speed) ? (v as Speed) : 'run'; } catch { return 'run'; }
+  });
+  const cycleSpeed = () => setSpeed((cur) => {
+    const next = SPEEDS[(SPEEDS.indexOf(cur) + 1) % SPEEDS.length];
+    try { localStorage.setItem('sidepiece_speed', next); } catch { /* private mode */ }
+    return next;
+  });
   const [actions, setActions] = useState<ActionInfo[]>([]);
 
   const [thread, setThread] = useState<Thread>();
@@ -88,7 +109,8 @@ function App() {
   const [toast, setToast] = useState<{ text: string; tone: 'info' | 'error' | 'good' }>();
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>('world');
-  const [sheet, setSheet] = useState<'nearby' | 'actions' | 'dm-profile' | null>(null);
+  const [walkRequest, setWalkRequest] = useState<{ kind: string; seq: number }>();
+  const [sheet, setSheet] = useState<'nearby' | 'actions' | 'places' | 'dm-profile' | 'stats' | 'settings' | null>(null);
   const [dialog, setDialog] = useState<DialogSpec>();
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [matches, setMatches] = useState<Match[]>([]);
@@ -102,6 +124,18 @@ function App() {
   const [inviteBusy, setInviteBusy] = useState(false);
   const [date, setDate] = useState<DateView>();
   const [dateBusy, setDateBusy] = useState(false);
+  const [encounter, setEncounter] = useState<EncounterView>();
+  const [encounterBusy, setEncounterBusy] = useState(false);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [stats, setStats] = useState<PlayerStats>();
+  const [visSaving, setVisSaving] = useState(false);
+  const [feed, setFeed] = useState<Feed>();
+  const [feedError, setFeedError] = useState<string>();
+  const [settings, setSettings] = useState<Settings>();
+  const [settingsError, setSettingsError] = useState<string>();
+  const [prefsSaving, setPrefsSaving] = useState(false);
+  // In-app alert preferences (spec 18); the server stores them, the shell honours them.
+  const alerts: NotificationPrefs = settings?.notifications ?? DEFAULT_ALERTS;
   const inviteStatus = useRef(new Map<string, string>());
 
   const notify = (text: string, tone: 'info' | 'error' | 'good' = 'info') => {
@@ -135,6 +169,10 @@ function App() {
 
   const refreshLife = useCallback(async () => {
     if (player) setLife(await api.get<Life>(`/v1/player/${player.player_id}/life`));
+  }, [player]);
+
+  const refreshStats = useCallback(async () => {
+    if (player) setStats(await api.get<PlayerStats>(`/v1/player/${player.player_id}/stats`));
   }, [player]);
 
   async function joinRoom(target: Room) {
@@ -287,8 +325,8 @@ function App() {
     const list = await api.get<Match[]>('/v1/social/matches', { player_id: player.player_id });
     setMatches(list);
     // Someone liked you back while you were away: show their match moment once.
-    setMatchShown((cur) => cur ?? list.find((m) => m.is_new));
-  }, [player]);
+    if (alerts.matches) setMatchShown((cur) => cur ?? list.find((m) => m.is_new));
+  }, [player, alerts.matches]);
 
   const closeMatch = (then?: (m: Match) => void) => {
     const m = matchShown;
@@ -375,8 +413,7 @@ function App() {
     if (!player || !outgoing) return;
     const result = await api.post<PrivateRoomResult>(`/v1/social/private-room/${outgoing.room.id}/consent`, { player_id: player.player_id, action: 'accept' });
     setOutgoing(undefined);
-    await joinRoom(result.room);
-    notify(`You and ${outgoing.targetName} stepped somewhere private`, 'good');
+    await enterPrivateRoom(result);
   });
 
   const cancelOutgoing = () => guard(async () => {
@@ -389,19 +426,187 @@ function App() {
     if (!player) return;
     const result = await api.post<PrivateRoomResult>(`/v1/social/private-room/${req.room_id}/consent`, { player_id: player.player_id, action });
     setIncoming((l) => l.filter((r) => r.room_id !== req.room_id));
-    if (action === 'accept') { await joinRoom(result.room); notify(`You joined ${req.from_display_name} somewhere private`, 'good'); }
+    if (action === 'accept') await enterPrivateRoom(result);
   });
 
   // ---------- Invitations & dates (spec 10/11/12) ----------
   const openSuggest = (targetId: string, name: string, openTo?: string[], initial?: string) => setSuggest({ targetId, name, openTo, initial });
 
-  const enterPrivate = (roomId: string, name: string) => guard(async () => {
+  // ---------- Private encounters (spec 13) ----------
+  const openEncounter = async (id: string) => {
     if (!player) return;
-    const r = await api.get<PrivateRoomResult>(`/v1/social/private-room/${roomId}`, { player_id: player.player_id });
+    setSheet(null);
+    setEncounter(await api.get<EncounterView>(`/v1/encounters/${id}`, { player_id: player.player_id }));
+  };
+
+  /** Every accepted private room holds an encounter: join the room for presence, then open the moment. */
+  async function enterPrivateRoom(r: PrivateRoomResult) {
     setTab('world');
     await joinRoom(r.room);
-    notify(`You and ${name} stepped somewhere private. Leave whenever you like.`, 'good');
+    if (r.encounter_id) await openEncounter(r.encounter_id);
+  }
+
+  const enterPrivate = (roomId: string) => guard(async () => {
+    if (!player) return;
+    await enterPrivateRoom(await api.get<PrivateRoomResult>(`/v1/social/private-room/${roomId}`, { player_id: player.player_id }));
   });
+
+  const encounterAction = (action: 'confirm' | 'complete' | 'leave') => guard(async () => {
+    if (!player || !encounter) return;
+    setEncounterBusy(true);
+    try {
+      const next = await api.post<EncounterView>(`/v1/encounters/${encounter.id}/${action}`, { player_id: player.player_id });
+      setEncounter((cur) => (cur && cur.id === next.id ? next : cur));
+      if (action === 'complete') { refreshLife().catch(() => {}); refreshStats().catch(() => {}); }
+    } finally {
+      setEncounterBusy(false);
+    }
+  });
+
+  const leaveEncounter = (e: EncounterView) => setDialog({
+    title: e.status === 'playing' ? 'Stop here?' : 'Not tonight?',
+    body: `${e.partner_name} will see that you called it a night. That's always okay, and there's no penalty for either of you.`,
+    confirmLabel: 'Leave',
+    cancelLabel: 'Stay',
+    onConfirm: () => { setDialog(undefined); encounterAction('leave'); },
+  });
+
+  const finishEncounter = (then?: () => void) => {
+    setEncounter(undefined);
+    refreshLife().catch(() => {});
+    refreshStats().catch(() => {});
+    refreshPlayerState().catch(() => {});
+    goTo('city').then(then);
+  };
+
+  // ---------- Outcomes & stats (spec 14/15/15A) ----------
+  const sendFeedback = (o: ActivityOutcome, tags: string[]) => guard(async () => {
+    if (!player) return;
+    setFeedbackBusy(true);
+    try {
+      const next = await api.post<ActivityOutcome>(`/v1/outcomes/${o.source_id}/feedback`, { player_id: player.player_id, tags });
+      setDate((d) => (d && d.id === next.source_id ? { ...d, outcome: next } : d));
+      setEncounter((e) => (e && e.id === next.source_id ? { ...e, outcome: next } : e));
+      notify('Thanks. Feedback sent.', 'good');
+    } finally {
+      setFeedbackBusy(false);
+    }
+  });
+
+  // ---------- Feed (spec 16) ----------
+  const refreshFeed = useCallback(async () => {
+    if (!player) return;
+    try {
+      setFeed(await api.get<Feed>('/v1/feed', { player_id: player.player_id }));
+      setFeedError(undefined);
+    } catch (err) {
+      setFeedError(err instanceof ApiError ? err.message : 'Could not load your feed');
+    }
+  }, [player]);
+
+  /** Every feed item links to where it happened. */
+  const feedAction = (action: string) => {
+    const [kind, ...rest] = action.split(':');
+    const arg = rest.join(':');
+    if (kind === 'chat') openDm(arg);
+    else if (kind === 'npc') { setTab('world'); openChat(arg); }
+    else if (kind === 'stats') openStats();
+    else if (kind === 'venue') { setTab('world'); goTo(arg); }
+  };
+
+  const openStats = () => { setTab('profile'); setSheet('stats'); refreshStats().catch(() => {}); };
+
+  const saveVisibility = (v: StatVisibility) => guard(async () => {
+    if (!player) return;
+    setVisSaving(true);
+    setStats((st) => st && { ...st, visibility: v });
+    try {
+      await api.post(`/v1/player/${player.player_id}/stats/visibility`, { player_id: player.player_id, visibility: v });
+    } catch (err) {
+      refreshStats().catch(() => {});
+      throw err;
+    } finally {
+      setVisSaving(false);
+    }
+  });
+
+  // ---------- Settings & privacy (spec 18) ----------
+  const refreshSettings = useCallback(async () => {
+    if (!player) return;
+    try {
+      setSettings(await api.get<Settings>(`/v1/player/${player.player_id}/settings`));
+      setSettingsError(undefined);
+    } catch (err) {
+      setSettingsError(err instanceof ApiError ? err.message : 'Could not load your settings');
+    }
+  }, [player]);
+  const openSettings = () => { setTab('profile'); setSheet('settings'); refreshSettings(); };
+
+  const saveAlerts = (n: NotificationPrefs) => guard(async () => {
+    if (!player) return;
+    setSettings((st) => st && { ...st, notifications: n });
+    try {
+      await api.post(`/v1/player/${player.player_id}/settings/notifications`, { player_id: player.player_id, notifications: n });
+    } catch (err) {
+      refreshSettings();
+      throw err;
+    }
+  });
+
+  /** Visibility toggles are avatar preferences: save the whole avatar with the change. */
+  const savePrefs = (patch: Partial<Preferences>) => guard(async () => {
+    if (!player) return;
+    const before = identity;
+    const id = { ...identity, preferences: { ...identity.preferences, ...patch } };
+    setIdentity(id);
+    setPrefsSaving(true);
+    try {
+      await api.post('/v1/avatar', {
+        player_id: player.player_id,
+        avatar: { display_name: id.alias, gender: id.gender, likes: id.likes, look: id.look, match_code: id.match_code, bio: id.bio, intent: id.intent, preferences: id.preferences },
+      });
+    } catch (err) {
+      setIdentity(before);
+      throw err;
+    } finally {
+      setPrefsSaving(false);
+    }
+  });
+
+  const unblock = (b: BlockedEntry) => setDialog({
+    title: `Unblock ${b.display_name}?`,
+    body: "You'll be able to see each other again. Matches and chats that ended stay ended, so you'd need to reconnect.",
+    confirmLabel: 'Unblock',
+    onConfirm: () => { setDialog(undefined); guard(async () => {
+      if (!player) return;
+      await api.post('/v1/moderation/unblock', { blocker_id: player.player_id, target_id: b.target_id });
+      setSettings((st) => st && { ...st, blocked: st.blocked.filter((x) => x.target_id !== b.target_id) });
+      notify(`${b.display_name} is unblocked`);
+      discover().catch(() => {});
+    }); },
+  });
+
+  const changePassword = async (current: string, next: string) => {
+    if (!player) return false;
+    try {
+      await api.post('/v1/account/password', { player_id: player.player_id, current_password: current, new_password: next });
+      notify('Password changed', 'good');
+      return true;
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : 'Something went wrong', 'error');
+      return false;
+    }
+  };
+
+  const deleteAccount = async (password: string) => {
+    if (!player) return;
+    try {
+      await api.post('/v1/account/delete', { player_id: player.player_id, password: password || null, confirm: 'DELETE' });
+      signOut();
+    } catch (err) {
+      notify(err instanceof ApiError ? err.message : 'Something went wrong', 'error');
+    }
+  };
 
   const openDate = (dateId: string) => guard(async () => {
     if (!player) return;
@@ -422,7 +627,7 @@ function App() {
         setThread(undefined);
         refreshLife().catch(() => {});
         if (inv.date_id) await openDate(inv.date_id);
-        else if (inv.room_id) await enterPrivate(inv.room_id, name);
+        else if (inv.room_id) await enterPrivate(inv.room_id);
         return;
       }
       inviteStatus.current.set(inv.id, inv.status);
@@ -442,7 +647,7 @@ function App() {
       setDmThread((t) => t && { ...t, invitations: (t.invitations ?? []).map((i) => (i.id === next.id ? next : i)) });
       refreshInbox().catch(() => {});
       if (action === 'accept' && next.date_id) await openDate(next.date_id);
-      else if (action === 'accept' && next.room_id) await enterPrivate(next.room_id, next.from_name);
+      else if (action === 'accept' && next.room_id) await enterPrivate(next.room_id);
       else if (action === 'decline') notify('Declined. The chat stays open.');
     } catch (err) {
       // The card may be stale (expired, cancelled meanwhile): refresh it, then show why.
@@ -466,6 +671,7 @@ function App() {
   const finishDate = (d: DateView) => {
     setDate(undefined);
     refreshLife().catch(() => {});
+    refreshStats().catch(() => {});
     refreshPlayerState().catch(() => {});
     if (d.partner_kind === 'player') openDm(d.partner_id);
     else setTab('world');
@@ -493,6 +699,7 @@ function App() {
       setThread(undefined);
       setDmThread(undefined);
       setDate((d) => (d?.partner_id === targetId ? undefined : d));
+      if (encounter?.partner_id === targetId) finishEncounter();
       refreshInbox().catch(() => {});
       notify(`${targetName} is blocked`);
       await discover();
@@ -529,7 +736,7 @@ function App() {
   usePolling(useCallback(() => {
     if (!player || !outgoing || outgoing.targetId.startsWith('npc:')) return;
     api.get<PrivateRoomResult>(`/v1/social/private-room/${outgoing.room.id}`, { player_id: player.player_id }).then(async (r) => {
-      if (r.consent_state === 'accepted') { setOutgoing(undefined); await joinRoom(r.room); notify(`${outgoing.targetName} accepted`, 'good'); }
+      if (r.consent_state === 'accepted') { setOutgoing(undefined); notify(`${outgoing.targetName} accepted`, 'good'); await enterPrivateRoom(r); }
       else if (r.consent_state !== 'requested') { setOutgoing(undefined); notify(`${outgoing.targetName} declined`, 'error'); }
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -554,7 +761,27 @@ function App() {
       .then((d) => setDate((cur) => (cur && cur.id === d.id ? d : cur)))
       .catch((err) => { if (err instanceof ApiError && err.status === 404) setDate(undefined); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player, date?.id]), 2000, inWorld && !!date && date.status === 'active');
+  }, [player, date?.id]), 2000, inWorld && !!date && (date.status === 'active' || (date.status === 'completed' && !date.outcome)));
+
+  usePolling(useCallback(() => {
+    if (!player || !encounter) return;
+    api.get<EncounterView>(`/v1/encounters/${encounter.id}`, { player_id: player.player_id })
+      .then((e) => setEncounter((cur) => (cur && cur.id === e.id ? e : cur)))
+      .catch((err) => { if (err instanceof ApiError && err.status === 404) setEncounter(undefined); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player, encounter?.id]), 2000, inWorld && !!encounter && (encounter.status === 'waiting' || encounter.status === 'playing' || (encounter.status === 'completed' && !encounter.outcome)));
+  useEffect(() => { if (inWorld) refreshStats().catch(() => {}); }, [inWorld, refreshStats]);
+  useEffect(() => { if (inWorld) refreshSettings(); }, [inWorld, refreshSettings]);
+  usePolling(useCallback(() => { refreshFeed(); }, [refreshFeed]), 15000, inWorld);
+  // Opening the feed clears its badge; the "New" markers stay for this visit.
+  useEffect(() => {
+    if (!inWorld || tab !== 'feed' || !player) return;
+    refreshFeed().then(() => api.post('/v1/feed/seen', { player_id: player.player_id })).then(() => setFeed((f) => f && { ...f, unseen_count: 0 })).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, inWorld]);
+
+  // A finished date/encounter can be read a moment before its rewards are written: the polls above keep going
+  // until the outcome arrives.
 
   // Spec 11 → 12: when the other side accepts while you're in the thread, take the sender to the date.
   useEffect(() => {
@@ -562,9 +789,10 @@ function App() {
       const before = inviteStatus.current.get(inv.id);
       inviteStatus.current.set(inv.id, inv.status);
       if (before === 'pending' && inv.status === 'accepted' && inv.outgoing) {
-        if (inv.date_id && inv.date_status === 'active') { notify(`${inv.target_name} accepted. See you there.`, 'good'); openDate(inv.date_id); }
-        else if (inv.room_id) notify(`${inv.target_name} accepted. The private room is ready when you are.`, 'good');
-      } else if (before === 'pending' && inv.outgoing && (inv.status === 'declined' || inv.status === 'expired')) {
+        // Joining the date isn't an alert: the sender is taken there either way.
+        if (inv.date_id && inv.date_status === 'active') { if (alerts.invitations) notify(`${inv.target_name} accepted. See you there.`, 'good'); openDate(inv.date_id); }
+        else if (inv.room_id && alerts.invitations) notify(`${inv.target_name} accepted. The private room is ready when you are.`, 'good');
+      } else if (alerts.invitations && before === 'pending' && inv.outgoing && (inv.status === 'declined' || inv.status === 'expired')) {
         notify(inv.status === 'declined' ? `${inv.target_name} passed this time.` : 'Your invitation expired.');
       }
     }
@@ -577,9 +805,12 @@ function App() {
 
   // ---------- Render ----------
   const name = identity.alias || player?.display_name || 'You';
-  const fullScreen = inPrivate || !!date; // hide shell chrome in immersive scenes
+  const fullScreen = inPrivate || !!date || !!encounter; // hide shell chrome in immersive scenes
   const incomingCount = incoming.length;
-  const messageBadge = incomingCount + matches.filter((m) => m.is_new).length + (inbox?.unread_count ?? 0) + (inbox?.invite_count ?? 0);
+  const messageBadge = incomingCount
+    + (alerts.matches ? matches.filter((m) => m.is_new).length : 0)
+    + (alerts.messages ? inbox?.unread_count ?? 0 : 0)
+    + (alerts.invitations ? inbox?.invite_count ?? 0 : 0);
 
   if (step === 'create') {
     return <main className="fullscreen creator-screen">
@@ -686,7 +917,10 @@ function App() {
       typingNpcId={typingNpc}
       onInteractNpc={openChat}
       onPortal={goTo}
-      paused={!!date}
+      paused={!!date || !!encounter}
+      speed={speed}
+      walkRequest={walkRequest}
+      hour={life ? life.clock.hour + Math.floor(life.clock.minute / 15) / 4 : undefined}
     >
       {tab === 'world' && thread && <NpcChat
         thread={thread}
@@ -702,6 +936,11 @@ function App() {
 
     {tab === 'world' && !fullScreen && !thread && !discoverOpen && <div className="world-dock">
       {venueKind !== 'city' && <button className="dock-btn" aria-label="Back to Lekki" disabled={loading} onClick={() => goTo('city')}><ArrowLeft size={16} strokeWidth={2.5} /><span className="dock-label">Lekki</span></button>}
+      <button className="dock-btn" aria-label={`Pace: ${speed}. Tap to change`} title="Walk / Run / Sprint (Shift = one step faster)" onClick={cycleSpeed}>
+        {speed === 'walk' ? <Footprints size={16} strokeWidth={2.5} /> : speed === 'run' ? <Wind size={16} strokeWidth={2.5} /> : <Zap size={16} strokeWidth={2.5} />}
+        <span className="dock-label">{speed === 'walk' ? 'Walk' : speed === 'run' ? 'Run' : 'Sprint'}</span>
+      </button>
+      {venueKind !== 'private_room' && <button className="dock-btn" aria-label="Go out: find a club" onClick={() => setSheet('places')}><MapPin size={16} strokeWidth={2.5} /><span className="dock-label">Go out</span></button>}
       {venueActions.length > 0 && <button className="dock-btn" aria-label="Things to do" onClick={() => setSheet('actions')}><Sparkles size={16} strokeWidth={2.5} /><span className="dock-label">Do</span></button>}
       {!inPrivate && <button className="dock-btn" aria-label="Nearby" onClick={() => setSheet('nearby')}><Users size={16} strokeWidth={2.5} /><span className="dock-label">Nearby</span>{profiles.length ? <b className="dock-count">{profiles.length}</b> : null}</button>}
     </div>}
@@ -717,7 +956,7 @@ function App() {
         onSuggest={(initial) => openSuggest(dmThread.target_id, dmThread.display_name, dmThread.open_to, initial)}
         onRespond={respondInvite}
         onJoinDate={(inv) => inv.date_id && openDate(inv.date_id)}
-        onEnterRoom={(inv) => inv.room_id && enterPrivate(inv.room_id, inv.outgoing ? inv.target_name : inv.from_name)}
+        onEnterRoom={(inv) => inv.room_id && enterPrivate(inv.room_id)}
         onMore={() => openDmControls(dmThread)}
       />
       : <MessagesPanel
@@ -731,13 +970,19 @@ function App() {
         onOpenNpc={(id) => { setTab('world'); openChat(id); }}
       />)}
 
-    {tab === 'feed' && <div className="tab-panel">
-      <header className="tab-panel-head"><h2>Feed</h2></header>
-      <EmptyState icon="✨" title="Your story starts here" body="Matches, invitations and achievements will show up in your feed as you play." actionLabel="Explore Lagos" onAction={() => setTab('world')} />
-    </div>}
+    {tab === 'feed' && <FeedPanel
+      feed={feed}
+      loading={!feed && !feedError}
+      error={feedError}
+      onRetry={() => refreshFeed()}
+      onAction={feedAction}
+      onExplore={() => setTab('world')}
+    />}
 
     {tab === 'profile' && <div className="tab-panel">
-      <header className="tab-panel-head"><h2>Profile</h2><span className="sticker">that's you ✨</span></header>
+      <header className="tab-panel-head profile-head"><h2>Profile</h2><span className="sticker">that's you ✨</span>
+        <button className="icon-btn settings-btn" aria-label="Settings & privacy" onClick={openSettings}><SettingsIcon size={18} strokeWidth={2.4} /></button>
+      </header>
       <button className="meet-cta" onClick={() => { setSheet(null); setDiscoverOpen(true); }}>
         <span className="meet-icon"><Heart size={22} strokeWidth={0} fill="currentColor" /></span>
         <span className="meet-text"><b>Meet someone new</b><small>See who's out in Lagos tonight</small></span>
@@ -757,12 +1002,7 @@ function App() {
           </div>
         </div>
       </section>
-      {life && <div className="stat-tiles">
-        <div className="tile cash"><Wallet size={18} strokeWidth={2.4} /><b>{naira(life.money)}</b><span>Cash</span></div>
-        <div className="tile level"><Star size={18} strokeWidth={2.4} /><b>Lv {life.level}</b><span className="xp"><i style={{ width: `${Math.min(100, (life.xp_into_level / Math.max(1, life.xp_for_next)) * 100)}%` }} /></span></div>
-        <div className="tile matches"><Heart size={18} strokeWidth={2.4} /><b>{matches.length}</b><span>Matches</span></div>
-        <div className="tile vibes"><Sparkles size={18} strokeWidth={2.4} /><b>{relationships.length}</b><span>Connections</span></div>
-      </div>}
+      <StatsHero stats={stats} onDetails={openStats} onExplore={() => setTab('world')} />
       <div className="action-tiles">
         <button className="action-tile" onClick={() => openCreator(1, 'edit')}><Shirt size={20} strokeWidth={2.3} /><span>Edit character</span></button>
         <button className="action-tile" onClick={() => openCreator(4, 'edit')}><SlidersHorizontal size={20} strokeWidth={2.3} /><span>Edit preferences</span></button>
@@ -784,6 +1024,11 @@ function App() {
           <strong>{nameFor(r.target_id)} <em>{tierFor(r.stats.affinity)}</em></strong>
           <TierMeter value={r.stats.affinity} />
         </div>)}
+      <button className="stats-more settings-row" onClick={openSettings}>
+        <SettingsIcon size={18} strokeWidth={2.4} />
+        <span><b>Settings & privacy</b><small>Visibility, alerts, blocked players, account</small></span>
+        <ArrowRight size={18} strokeWidth={2.6} />
+      </button>
       <button className="link-btn signout" onClick={signOut}><LogOut size={15} strokeWidth={2.4} /> Sign out</button>
     </div>}
 
@@ -799,6 +1044,41 @@ function App() {
       onMore={() => { setSheet(null); openDmControls(dmThread); }}
       onMeet={(venue) => { setSheet(null); setTab('world'); goTo(venue); }}
     />}
+    {sheet === 'stats' && tab === 'profile' && stats && <StatsSheet stats={stats} saving={visSaving} onVisibility={saveVisibility} onClose={() => setSheet(null)} />}
+    {sheet === 'settings' && tab === 'profile' && <SettingsSheet
+      settings={settings}
+      error={settingsError}
+      onRetry={() => refreshSettings()}
+      prefs={identity.preferences}
+      saving={prefsSaving}
+      onPrefs={savePrefs}
+      onDiscoveryPrefs={() => { setSheet(null); openCreator(4, 'edit'); }}
+      onStatVisibility={openStats}
+      onAlerts={saveAlerts}
+      onUnblock={unblock}
+      onLegal={setLegal}
+      onSignOut={signOut}
+      onChangePassword={changePassword}
+      onDelete={deleteAccount}
+      onClose={() => setSheet(null)}
+    />}
+    {legal && <LegalPopup doc={legal} onClose={() => setLegal(undefined)} />}
+    {sheet === 'places' && <Sheet title="Go out tonight" subtitle={`${CLUBS.length} clubs and lounges in Lagos`} onClose={() => setSheet(null)}>
+      {[...new Set(CLUBS.map((c) => c.area))].map((area) => <section key={area} className="places-area">
+        <h4>{area}</h4>
+        <div className="places-list">
+          {CLUBS.filter((c) => c.area === area).map((c) => <article key={c.kind} className="place-card" style={{ '--club': c.color } as React.CSSProperties}>
+            <div><strong>{c.name}</strong><span>{c.street}</span><p>{c.vibe}</p></div>
+            <div className="place-go">
+              {venueKind === 'city' && <button className="ghost" onClick={() => { setSheet(null); setWalkRequest((w) => ({ kind: c.kind, seq: (w?.seq ?? 0) + 1 })); }}><Footprints size={15} strokeWidth={2.4} /> Walk</button>}
+              <button onClick={() => { setSheet(null); goTo(c.kind); }}><CarTaxiFront size={15} strokeWidth={2.4} /> Ride there</button>
+            </div>
+          </article>)}
+        </div>
+      </section>)}
+      <p className="creator-hint">Walk to see the city, or take a ride straight to the door. Clubs have neon names and searchlights over the rooftops, and you can tap one to walk there.</p>
+    </Sheet>}
+
     {sheet === 'actions' && <Sheet title="Things to do" subtitle={room?.display_name} onClose={() => setSheet(null)}>
       <div className="action-list">{venueActions.map((a) => <button key={a.id} className="ghost" onClick={() => { doAction(a); }}>{a.label}</button>)}</div>
     </Sheet>}
@@ -810,7 +1090,7 @@ function App() {
       onMatch={setMatchShown}
       notify={notify}
       onBroaden={() => { setDiscoverOpen(false); openCreator(4, 'edit'); }}
-      onChangeLocation={() => { setDiscoverOpen(false); setTab('world'); goTo(venueKind === 'rooftop_party' ? 'neon_lounge' : 'rooftop_party'); }}
+      onChangeLocation={() => { setDiscoverOpen(false); setTab('world'); const others = CLUBS.filter((c) => c.kind !== venueKind); goTo(others[Math.floor(Math.random() * others.length)].kind); }}
       onMeetNpc={() => { setDiscoverOpen(false); setTab('world'); goTo('neon_lounge').then(() => setSheet('nearby')); }}
     />}
 
@@ -836,15 +1116,31 @@ function App() {
       date={date}
       myLook={identity.look}
       busy={dateBusy}
+      feedbackBusy={feedbackBusy}
       onChoose={chooseInDate}
       onLeave={() => leaveDate(date)}
       onDone={() => finishDate(date)}
+      onFeedback={(tags) => date.outcome && sendFeedback(date.outcome, tags)}
+      onStats={() => { setDate(undefined); refreshLife().catch(() => {}); openStats(); }}
+    />}
+
+    {encounter && <EncounterScene
+      encounter={encounter}
+      myLook={identity.look}
+      busy={encounterBusy}
+      feedbackBusy={feedbackBusy}
+      onConfirm={() => encounterAction('confirm')}
+      onComplete={() => encounterAction('complete')}
+      onLeave={() => leaveEncounter(encounter)}
+      onFeedback={(tags) => encounter.outcome && sendFeedback(encounter.outcome, tags)}
+      onDone={() => finishEncounter()}
+      onStats={() => finishEncounter(openStats)}
     />}
 
     {dialog && <ConfirmDialog spec={dialog} onCancel={() => setDialog(undefined)} />}
 
-    {!fullScreen && <BottomNav tab={tab} onTab={(t) => { setTab(t); setSheet(null); setDiscoverOpen(false); if (t !== 'messages') setDmThread(undefined); }} badges={{ messages: messageBadge || undefined }} onDiscover={() => { setSheet(null); setDiscoverOpen(true); }} />}
-    {inPrivate && !date && <button className="exit-scene" disabled={loading} onClick={() => goTo('city')}>← Leave</button>}
+    {!fullScreen && <BottomNav tab={tab} onTab={(t) => { setTab(t); setSheet(null); setDiscoverOpen(false); if (t !== 'messages') setDmThread(undefined); }} badges={{ messages: messageBadge || undefined, feed: alerts.feed && tab !== 'feed' && feed?.unseen_count ? feed.unseen_count : undefined }} onDiscover={() => { setSheet(null); setDiscoverOpen(true); }} />}
+    {inPrivate && !date && !encounter && <button className="exit-scene" disabled={loading} onClick={() => goTo('city')}>← Leave</button>}
 
     <div className="toast-stack">
       {outgoing && <div className="consent-toast">

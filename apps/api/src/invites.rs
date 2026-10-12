@@ -6,8 +6,8 @@
 //! after a decline. NPCs answer at once from their relationship with the player (simulated consent, ADR 0003).
 
 use super::{
-    AppError, SharedState, chat, dates, hidden_targets, life, messages, npcs, player_avatar,
-    publish_event, require_player,
+    AppError, SharedState, chat, dates, encounters, hidden_targets, life, messages, npcs,
+    player_avatar, publish_event, require_player,
 };
 use axum::{
     Json,
@@ -43,7 +43,7 @@ pub const ACTIVITIES: &[Activity] = &[
     Activity {
         id: "public_date",
         label: "Rooftop date",
-        description: "Small chops and the skyline at the Victoria Island Rooftop. Public, relaxed, about five minutes.",
+        description: "Small chops and the skyline at Sky Garden, Victoria Island. Public, relaxed, about five minutes.",
         icon: "🌇",
         cost: 12_000,
         venue: "rooftop_party",
@@ -53,7 +53,7 @@ pub const ACTIVITIES: &[Activity] = &[
     Activity {
         id: "venue_visit",
         label: "Lounge night",
-        description: "Grab a booth together at Ikoyi Lounge. Drinks, music, maybe a dance.",
+        description: "Grab a booth together at Club 57. Drinks, music, maybe a dance.",
         icon: "🍸",
         cost: 6_000,
         venue: "neon_lounge",
@@ -113,11 +113,13 @@ pub async fn list_activities() -> Json<ApiOk<Vec<ActivityInfo>>> {
 }
 
 const SELECT: &str = "select i.id, i.from_player, i.target_id, i.activity, i.cost, i.status, i.expires_at, i.created_at,
-        i.room_id, i.note, fp.display_name as from_name, tp.display_name as target_name, d.status as date_status
+        i.room_id, i.note, fp.display_name as from_name, tp.display_name as target_name, d.status as date_status,
+        e.id as encounter_id
      from invitations i
      join players fp on fp.id = i.from_player
      left join players tp on i.target_id = 'player:' || tp.id::text
-     left join date_sessions d on d.id = i.id";
+     left join date_sessions d on d.id = i.id
+     left join encounters e on e.room_id = i.room_id";
 
 fn to_view(row: &PgRow, me: Uuid, now: DateTime<Utc>) -> InvitationView {
     let id: Uuid = row.get("id");
@@ -153,6 +155,7 @@ fn to_view(row: &PgRow, me: Uuid, now: DateTime<Utc>) -> InvitationView {
         date_status,
         room_id: row.get("room_id"),
         note: row.get("note"),
+        encounter_id: row.get("encounter_id"),
     }
 }
 
@@ -253,6 +256,8 @@ async fn on_accept(
                 .bind(&room_id)
                 .execute(&state.db)
                 .await?;
+            // Screen 13: the room holds an encounter that both still confirm inside.
+            encounters::open(state, &room_id, from, target).await?;
             Ok(())
         }
     }

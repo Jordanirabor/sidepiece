@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArcRotateCamera, Camera, Color3, Engine, Scene, Vector3 } from '@babylonjs/core';
+import { ArcRotateCamera, Camera, Color3, Engine, Matrix, MeshBuilder, Scene, StandardMaterial, Vector3 } from '@babylonjs/core';
 import { applyCinematicLook, createEngine, disposeEngine } from './render';
-import { buildVenue, Humanoid, makeLabel, Portal } from './venue';
+import { buildVenue, Humanoid, makeLabel, Portal, VenueHandles } from './venue';
+import { clubOf } from './venues';
 import { makeAvatar } from './avatar3d';
 import { Look } from './look';
 
@@ -23,6 +24,10 @@ type ChatLine = { id: number; who: string; text: string; system?: boolean };
 type Remote = { h: Humanoid; target: Vector3; rot: number; name: string };
 
 const INTERACT_DISTANCE = 2.2;
+const WALK_SPEED = 3.2;
+export type Speed = 'walk' | 'run' | 'sprint';
+export const SPEEDS: Speed[] = ['walk', 'run', 'sprint'];
+const SPEED_MPS: Record<Speed, number> = { walk: WALK_SPEED, run: 7.5, sprint: 14 };
 type Target = { type: 'npc'; npc: SceneNpc } | { type: 'portal'; portal: Portal };
 const targetKey = (t: Target | null) => (t ? (t.type === 'npc' ? `npc:${t.npc.id}` : `portal:${t.portal.kind}`) : '');
 
@@ -37,10 +42,16 @@ type Props = {
   onPortal: (kind: string) => void;
   /** Stop rendering and input while a full-screen scene (a date) covers the world. The room stays joined. */
   paused?: boolean;
+  /** Pace for keyboard, joystick and tap-to-move. */
+  speed?: Speed;
+  /** "Take me there" from the Go out sheet: walk to that venue's door (bump `seq` to repeat). */
+  walkRequest?: { kind: string; seq: number };
+  /** Game-clock hour (0..24) for outdoor daylight. */
+  hour?: number;
   children?: React.ReactNode;
 };
 
-export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, onInteractNpc, onPortal, paused = false, children }: Props) {
+export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, onInteractNpc, onPortal, paused = false, speed = 'walk', walkRequest, hour, children }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -58,7 +69,22 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
   const portalRef = useRef(onPortal);
   const typingRef = useRef<string | undefined>(typingNpcId);
   const pausedRef = useRef(paused);
+  const hourRef = useRef(hour);
+  const speedRef = useRef<Speed>(speed);
+  speedRef.current = speed;
+  const walkToPortalRef = useRef<(kind: string) => void>(() => {});
+  useEffect(() => { if (walkRequest) walkToPortalRef.current(walkRequest.kind); }, [walkRequest?.seq]);
+  const venueRef = useRef<VenueHandles | null>(null);
+  const lastVenueRef = useRef<string | undefined>(undefined);
+  /** Tap/click-to-move destination on the ground. */
+  const goalRef = useRef<Vector3 | null>(null);
+  const [loading, setLoading] = useState(true);
   pausedRef.current = paused;
+  // `?hour=21` pins the time of day (QA, screenshots).
+  const pinnedHour = new URLSearchParams(window.location.search).get('hour');
+  if (pinnedHour !== null) hour = +pinnedHour;
+  hourRef.current = hour;
+  useEffect(() => { if (hour !== undefined) venueRef.current?.setHour?.(hour); }, [hour]);
   const [target, setTarget] = useState<Target | null>(null);
   const [chat, setChat] = useState<ChatLine[]>([]);
   const [draft, setDraft] = useState('');
@@ -106,25 +132,43 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
     if (!engine) return;
     const scene = new Scene(engine);
     sceneRef.current = scene;
-    const venue = buildVenue(scene, venueKind);
+    // Back in the city you step out of the club you just left.
+    const venue = buildVenue(scene, venueKind, lastVenueRef.current);
+    lastVenueRef.current = venueKind;
+    venueRef.current = venue;
+    goalRef.current = null;
+    // Cover the canvas until streamed assets are in, so nobody sees an empty or half-built world.
+    setLoading(true);
+    const reveal = () => { if (!scene.isDisposed) scene.executeWhenReady(() => setLoading(false)); };
+    (venue.ready ?? Promise.resolve()).then(reveal, reveal);
+    if (hourRef.current !== undefined) venue.setHour?.(hourRef.current);
     castRef.current = venue.castShadow;
 
     // Third-person, slightly over the shoulder, behind the player (player spawns facing +Z).
-    const camera = new ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.25, 7.5, venue.playerSpawn.add(new Vector3(0, 1.2, 0)), scene);
+    const heading = venue.camera?.alpha ?? -Math.PI / 2;
+    const camera = new ArcRotateCamera('camera', heading, Math.PI / 2.25, 7.5, venue.playerSpawn.add(new Vector3(0, 1.2, 0)), scene);
     camera.minZ = 0.1;
     camera.attachControl(canvasRef.current, true);
-    camera.lowerRadiusLimit = 4;
-    camera.upperRadiusLimit = 18;
+    // Orbit and zoom only: panning moved the target away, then the follow snapped it back (the camera "fought" you).
+    camera.panningSensibility = 0;
+    // Arrow keys move the player; the camera's own arrow-key orbit made the view swing on left/right.
+    camera.inputs.removeByType('ArcRotateCameraKeyboardMoveInput');
+    camera.wheelPrecision = 12; // ~0.6 m per wheel notch at the default inertia
+    camera.lowerRadiusLimit = 3;
+    camera.upperRadiusLimit = venue.camera?.upperRadius ?? 18;
     camera.upperBetaLimit = Math.PI / 2.1;
     camera.lowerBetaLimit = Math.PI / 5;
-    camera.maxZ = 400;
-    applyCinematicLook(scene, [camera], venueKind === 'neon_lounge' ? { exposure: 1.4, bloomWeight: 0.4 } : {});
+    camera.maxZ = venue.camera?.maxZ ?? 400;
+    applyCinematicLook(scene, [camera], ['club', 'lounge'].includes(clubOf(venueKind)?.style ?? '') ? { exposure: 1.4, bloomWeight: 0.4 }
+      : venueKind === 'city' ? { exposure: 1.12, contrast: 1.08, vignette: 0.2, bloomThreshold: 0.95, bloomWeight: 0.2, ao: true } : {});
 
     const local = makeAvatar(scene, 'you', look, new Color3(1, 0.1, 0.55), player?.display_name ?? 'You', '#ffc0df', { castShadow: venue.castShadow });
     local.root.position = venue.playerSpawn.clone();
+    // Face the way the camera looks (avatars face +Z at rest; the camera looks along -(cos α, sin α)).
+    local.root.rotation.y = Math.atan2(-Math.cos(heading), -Math.sin(heading));
     local.meshes.forEach((m) => venue.castShadow(m));
     // Test/debug hook used by automated UI checks (position, portals, venue; `scene` for readiness probes).
-    (window as unknown as { __sp?: unknown }).__sp = { scene, pos: () => local.root.position.asArray(), portals: venue.portals.map((p) => ({ kind: p.kind, pos: p.position.asArray() })), venue: venueKind };
+    (window as unknown as { __sp?: unknown }).__sp = { scene, pos: () => local.root.position.asArray(), portals: venue.portals.map((p) => ({ kind: p.kind, pos: p.position.asArray() })), venue: venueKind, setHour: (h: number) => venue.setHour?.(h), camAlpha: () => camera.alpha, teleport: (x: number, z: number, rot = 0) => { local.root.position.set(x, 0, z); local.root.rotation.y = rot; camera.alpha = -Math.PI / 2 - rot; } };
 
     const npcActors = npcs.map((npc) => {
       const actor = { bubbleY: 2.75 };
@@ -163,12 +207,87 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
 
+    // Tap/click to move (a drag still orbits the camera). Tapping a person, a door or a building walks you there
+    // along the streets; people and doors open when you arrive.
+    const marker = MeshBuilder.CreateTorus('goal-marker', { diameter: 0.9, thickness: 0.06, tessellation: 32 }, scene);
+    const markerMat = new StandardMaterial('goal-marker-mat', scene);
+    markerMat.diffuseColor = Color3.Black();
+    markerMat.emissiveColor = new Color3(1, 0.25, 0.6);
+    markerMat.disableLighting = true;
+    marker.material = markerMat;
+    marker.isPickable = false;
+    marker.setEnabled(false);
+    let path: Vector3[] = [];
+    let arrive: Target | null = null;
+    const stopWalk = () => { path = []; arrive = null; goalRef.current = null; marker.setEnabled(false); };
+    const walkTo = (goal: Vector3, then: Target | null = null) => {
+      const g = new Vector3(goal.x, 0, goal.z);
+      path = venue.route ? venue.route(local.root.position.clone(), g) : [g];
+      arrive = then;
+      goalRef.current = g;
+      marker.position = g.add(new Vector3(0, 0.05, 0));
+      marker.setEnabled(true);
+    };
+    let down: { x: number; y: number; t: number } | null = null;
+    const canvas = canvasRef.current!;
+    const onDown = (e: PointerEvent) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; };
+    const onUp = (e: PointerEvent) => {
+      const d = down;
+      down = null;
+      if (!d || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 8 || performance.now() - d.t > 450) return;
+      const rect = canvas.getBoundingClientRect();
+      const scale = engine.getRenderWidth() / rect.width;
+      const ray = scene.createPickingRay((e.clientX - rect.left) * scale, (e.clientY - rect.top) * scale, Matrix.Identity(), camera);
+      const dir = ray.direction.normalize();
+      // People first: the nearest one whose body the ray passes close to.
+      const along = (p: Vector3) => { const q = p.add(new Vector3(0, 1, 0)); const k = Vector3.Dot(q.subtract(ray.origin), dir); return { k, miss: Vector3.Distance(ray.origin.add(dir.scale(k)), q) }; };
+      let person: { pos: Vector3; npc?: SceneNpc; k: number } | null = null;
+      for (const a of npcActors) { const h = along(a.h.root.position); if (h.k > 0 && h.miss < 0.9 && (!person || h.k < person.k)) person = { pos: a.h.root.position, npc: a.npc, k: h.k }; }
+      remotesRef.current.forEach((r) => { const h = along(r.h.root.position); if (h.k > 0 && h.miss < 0.9 && (!person || h.k < person.k)) person = { pos: r.h.root.position, k: h.k }; });
+      const picked = venue.pick?.(ray.origin, dir, local.root.position) ?? null;
+      const groundK = dir.y < -0.01 ? -ray.origin.y / dir.y : Infinity;
+      if (person && person.k < Math.min(groundK, picked?.distance ?? Infinity) + 1) {
+        const p = person as { pos: Vector3; npc?: SceneNpc };
+        const toward = local.root.position.subtract(p.pos);
+        toward.y = 0;
+        walkTo(toward.length() > 1.3 ? p.pos.add(toward.normalize().scale(1.3)) : local.root.position, p.npc ? { type: 'npc', npc: p.npc } : null);
+        return;
+      }
+      if (picked) {
+        const portal = picked.portal ? venue.portals.find((x) => x.kind === picked.portal) : venue.portals.find((x) => Vector3.Distance(x.position, picked.point) < 2.5);
+        walkTo(portal ? portal.position : picked.point, portal ? { type: 'portal', portal } : null);
+        return;
+      }
+      if (venue.pick) return; // the city picked nothing: the sky
+      if (groundK === Infinity) return; // the sky
+      const hit = ray.origin.add(dir.scale(groundK));
+      const b = venue.bounds;
+      hit.x = Math.max(-b.x, Math.min(b.x, hit.x));
+      hit.z = Math.max(-b.z, Math.min(b.z, hit.z));
+      const portal = venue.portals.find((p) => Vector3.Distance(p.position, new Vector3(hit.x, 0, hit.z)) < 2.5);
+      walkTo(portal ? portal.position : hit, portal ? { type: 'portal', portal } : null);
+    };
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointerup', onUp);
+    walkToPortalRef.current = (kind) => {
+      const portal = venue.portals.find((p) => p.kind === kind);
+      if (portal) walkTo(portal.position, { type: 'portal', portal });
+    };
+
     let lastSent = 0;
+    let running = false;
+    let stuck = 0;
+    /** Turn smoothly towards a heading (shortest way round) instead of snapping. */
+    const face = (heading: number, dt: number) => {
+      const cur = local.root.rotation.y;
+      const diff = Math.atan2(Math.sin(heading - cur), Math.cos(heading - cur));
+      local.root.rotation.y = cur + diff * Math.min(1, dt * 12);
+    };
     engine.runRenderLoop(() => {
       if (pausedRef.current) { keysRef.current.clear(); return; }
       const dt = Math.min(engine.getDeltaTime() / 1000, 0.1);
       const t = performance.now() / 1000;
-      venue.animate(t);
+      venue.animate(t, dt);
 
       // Movement is relative to camera direction.
       const keys = keysRef.current;
@@ -181,20 +300,62 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
       fx += moveVecRef.current.x;
       fz += moveVecRef.current.z;
       const mag = Math.min(1, Math.hypot(fx, fz));
-      const moving = mag > 0.06;
-      if (moving) {
+      const steering = mag > 0.06;
+      // The chosen pace (Walk / Run / Sprint in the dock); Shift or the joystick rim bumps it one step.
+      const base = SPEEDS.indexOf(speedRef.current);
+      const boost = keys.has('shift') || moveVecRef.current.x ** 2 + moveVecRef.current.z ** 2 > 0.9 ? 1 : 0;
+      const pace = SPEEDS[Math.min(SPEEDS.length - 1, base + boost)];
+      const speed = SPEED_MPS[pace];
+      let moving = false;
+      if (steering && path.length) stopWalk();
+      if (steering) {
         const forward = camera.getForwardRay().direction;
         const fwd = new Vector3(forward.x, 0, forward.z).normalize();
         const right = Vector3.Cross(Vector3.Up(), fwd).normalize();
         const dir = fwd.scale(fz).add(right.scale(fx)).normalize();
-        local.root.position.addInPlace(dir.scale(3.2 * mag * dt));
-        local.root.rotation.y = Math.atan2(dir.x, dir.z);
+        const from = local.root.position.clone();
+        const to = from.add(dir.scale(speed * mag * dt));
         const b = venue.bounds;
-        local.root.position.x = Math.max(-b.x, Math.min(b.x, local.root.position.x));
-        local.root.position.z = Math.max(-b.z, Math.min(b.z, local.root.position.z));
+        to.x = Math.max(-b.x, Math.min(b.x, to.x));
+        to.z = Math.max(-b.z, Math.min(b.z, to.z));
+        local.root.position = venue.collide ? venue.collide(from, to) : to;
+        face(Math.atan2(dir.x, dir.z), dt);
+        moving = true;
+      } else if (path.length) {
+        const to = path[0].subtract(local.root.position);
+        to.y = 0;
+        const dist = to.length();
+        if (dist < 0.3) {
+          path.shift();
+          if (!path.length) {
+            const then = arrive;
+            stopWalk();
+            if (then) activate(then);
+          }
+        } else if (stuck > 30) stopWalk();
+        else {
+          // Long walks pick up the pace by themselves; the last few metres slow to a walk.
+          const v = Math.min(dist / dt, path.length > 1 || dist > 12 ? Math.max(speed, SPEED_MPS.run) : speed);
+          const dir = to.normalize();
+          const from = local.root.position.clone();
+          const next = from.add(dir.scale(v * dt));
+          local.root.position = venue.collide ? venue.collide(from, next) : next;
+          stuck = Vector3.Distance(from, local.root.position) < v * dt * 0.2 ? stuck + 1 : 0;
+          face(Math.atan2(dir.x, dir.z), dt);
+          moving = true;
+          running = v > WALK_SPEED + 0.5;
+        }
+        marker.rotation.y += dt * 2;
+        marker.scaling.setAll(1 + Math.sin(t * 6) * 0.08);
       }
-      local.animateWalk(moving, dt);
-      camera.target = local.root.position.add(new Vector3(0, 1.2, 0));
+      if (steering) running = pace !== 'walk';
+      else if (!moving) running = false;
+      local.animateWalk(moving, dt, running);
+
+      // Camera: follow rigidly at the zoom the player picked. Moving the target in place matters: assigning
+      // `camera.target` re-aims the camera from where it stands (recomputing alpha), which swung the view and
+      // walked you in circles when strafing. (An automatic pull-in near buildings made the zoom pulse; removed.)
+      camera.target.copyFrom(local.root.position).addInPlaceFromFloats(0, 1.2, 0);
 
       remotesRef.current.forEach((r) => {
         const before = r.h.root.position.clone();
@@ -248,9 +409,12 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('resize', onResize);
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointerup', onUp);
       targetRef.current = null;
       setTarget(null);
       castRef.current = () => {};
+      venueRef.current = null;
       engine.stopRenderLoop();
       scene.dispose();
       sceneRef.current = null;
@@ -336,11 +500,12 @@ export function SceneView({ room, player, joinTicket, look, npcs, typingNpcId, o
 
   return <section className="stage">
     <canvas className="scene" ref={canvasRef} />
+    <div className={`scene-veil ${loading ? 'on' : ''}`} aria-hidden={!loading}><span>Loading Lagos…</span></div>
     <div className="venue-badge">
       <span>{room?.kind === 'private_room' ? 'Private Scene' : room?.kind === 'city' ? 'Lagos' : 'Venue'}</span>
       <strong>{room ? room.display_name : 'Preview'}</strong>
     </div>
-    <div className="controls-hint">Drag the pad or WASD to move · tap a glowing prompt to interact</div>
+    <div className="controls-hint">Tap the ground or use WASD to move · Shift to run · tap a glowing prompt to interact</div>
     <div
       className="joystick"
       onPointerDown={(e) => {

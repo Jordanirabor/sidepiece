@@ -29,13 +29,24 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const A = await makePlayer('Ada' + Date.now() % 1000, ['Caring', 'Humorous'], 'dress_red');
 const H = await makePlayer('Hub' + Date.now() % 1000, ['Caring'], 'tee_white');
 const B = await makePlayer('Ben' + Date.now() % 1000, ['Caring'], 'tee_white', { bio: 'Here for good music and better company', intent: 'flirt', preferences: { interests: ['Afrobeats', 'Food spots'], relationship_style: 'committed', public_relationship_style: false } });
+// Modular looks (ADR 0017): parts and colours save; junk colours are rejected.
+const lookBase = { gender: 'female', skin_tone: 0.2, hair_color: '#111111', hair_length: 0.8, body_type: 0.5, face: [0, 0, 0, 0], top: 'dress_red', bottom: 'skirt_black', accessory: 'none', style: 'glam' };
+must(await call('POST', '/v1/avatar', H.token, { player_id: H.player_id, avatar: { display_name: H.display_name, gender: 'female', likes: ['Caring'], look: { ...lookBase, hair_style: 'afro', shoes: 'heels', top_color: '#ff2f91' }, match_code: '#1' } }), 'modular look saves');
+check((await call('POST', '/v1/avatar', H.token, { player_id: H.player_id, avatar: { display_name: H.display_name, gender: 'female', likes: ['Caring'], look: { ...lookBase, top_color: 'red' }, match_code: '#1' } })).status === 400, 'look colours must be #rrggbb');
+console.log('looks ok: modular parts save, junk colours rejected');
 const roomA = must(await call('POST', '/v1/matchmaking/join', A.token, { player_id: A.player_id, preferred_room: 'neon_lounge' }), 'join A');
 const a = await connect(A, roomA, { gender: 'female', top: 'dress_red', style: 'glam', skin_tone: 0.4 });
 a.ws.send(JSON.stringify({ type: 'move', x: 1.5, y: 0, z: 2, rot_y: 1 }));
 await sleep(200);
 const roomB = must(await call('POST', '/v1/matchmaking/join', B.token, { player_id: B.player_id, preferred_room: 'neon_lounge' }), 'join B');
 log('rooms:', roomA.id, roomB.id);
-check(roomA.display_name === 'Ikoyi Lounge', `lounge is named Ikoyi Lounge (got ${roomA.display_name})`);
+check(roomA.display_name === 'Club 57', `lounge is named Club 57 (got ${roomA.display_name})`);
+// Real Lagos clubs (ADR 0019): every catalog venue is joinable, unknown kinds are refused.
+const quilox = must(await call('POST', '/v1/matchmaking/join', B.token, { player_id: B.player_id, preferred_room: 'quilox' }), 'join quilox');
+check(quilox.display_name === 'Quilox' && quilox.id.startsWith('quilox-'), `quilox room (got ${quilox.id} ${quilox.display_name})`);
+const bogus = await call('POST', '/v1/matchmaking/join', B.token, { player_id: B.player_id, preferred_room: 'nowhere' });
+check(bogus.status === 400, `unknown venue is refused (got ${bogus.status})`);
+must(await call('POST', '/v1/matchmaking/join', B.token, { player_id: B.player_id, preferred_room: 'neon_lounge' }), 'B back to the lounge');
 const hub = must(await call('POST', '/v1/matchmaking/join', H.token, { player_id: H.player_id, preferred_room: 'city' }), 'join hub');
 check(hub.display_name === 'Lekki Phase 1', `hub is named Lekki Phase 1 (got ${hub.display_name})`);
 const b = await connect(B, roomB, { gender: 'male', top: 'tee_white', style: 'streetwear', skin_tone: 0.7 });
@@ -196,6 +207,8 @@ for (const beat of [1, 2]) { must(await choose(A, beat, 0), 'A picks'); must(awa
 const done = await getDate(A);
 check(done.status === 'completed' && done.outcome?.label === 'Sparks flew' && done.outcome.objective_met, `date completes with an outcome (${done.outcome?.label}, chemistry ${done.chemistry}/${done.chemistry_goal})`);
 check((await cashOf(A)).xp === aXp0 + done.outcome.xp && (await cashOf(B)).xp === bXp0 + done.outcome.xp, 'both get the date XP exactly once');
+check(done.outcome.money > 0 && done.outcome.kind === 'date' && done.outcome.partner_name === B.display_name, `date outcome pays ₦ (${done.outcome.money})`);
+check(done.outcome.achievements.includes('First date') && done.outcome.reputation_delta > 0, `outcome shows unlocked achievements and reputation (${done.outcome.achievements.join(', ')}, +${done.outcome.reputation_delta})`);
 check((await choose(A, 3, 0)).status === 409, 'no choices after the date ends');
 must(await call('POST', `${dateUrl}/leave`, A.token, { player_id: A.player_id }), 'leave after done');
 check((await getDate(A)).status === 'completed', 'leaving a finished date keeps it completed');
@@ -242,6 +255,97 @@ log('third party ticket ->', intruder.status, intruder.error);
 const okTicket = await call('POST', '/v1/rooms/join-ticket', B.token, { player_id: B.player_id, room_id: pr.room.id });
 log('B ticket after consent ->', okTicket.status, okTicket.ok);
 
+// ---- M7: outcomes, feedback, encounters, stats ----
+const fb = (p, id, tags) => call('POST', `/v1/outcomes/${id}/feedback`, p.token, { player_id: p.player_id, tags });
+check((await fb(A, inv4.id, ['Rude'])).status === 400, 'unknown feedback tag -> 400');
+check((await fb(A, inv4.id, [])).status === 400, 'empty feedback -> 400 (skipping sends nothing)');
+check((await fb(S, inv4.id, ['Funny'])).status === 404, 'outsiders cannot leave feedback');
+const aXpFb = (await cashOf(A)).xp;
+const fbOut = must(await fb(A, inv4.id, ['Great vibe', 'Funny']), 'A feedback');
+check(JSON.stringify(fbOut.my_feedback) === JSON.stringify(['Great vibe', 'Funny']), 'feedback updates the outcome summary');
+check((await fb(A, inv4.id, ['Funny'])).status === 409, 'feedback once per activity');
+check((await cashOf(A)).xp === aXpFb, 'feedback never changes rewards');
+check(JSON.stringify((await getDate(B)).outcome.their_feedback) === JSON.stringify(['Great vibe', 'Funny']), "partner sees the feedback on their outcome");
+
+const enc = (p, id, action) => action ? call('POST', `/v1/encounters/${id}/${action}`, p.token, { player_id: p.player_id }) : call('GET', `/v1/encounters/${id}?player_id=${p.player_id}`, p.token);
+const encId1 = acc6.encounter_id;
+check(!!encId1, 'accepting a private invitation opens an encounter');
+check((await enc(S, encId1)).status === 404, 'outsiders cannot see the encounter');
+const e0 = must(await enc(A, encId1), 'A opens encounter');
+check(e0.status === 'waiting' && !e0.i_confirmed && !e0.partner_confirmed && e0.partner_name === B.display_name, 'encounter waits for both to confirm');
+check((await enc(A, encId1, 'complete')).status === 409, 'cannot complete before both agree');
+const e1 = must(await enc(A, encId1, 'confirm'), 'A confirms');
+check(e1.status === 'waiting' && e1.i_confirmed && !e1.partner_confirmed, 'one confirmation is not enough');
+check(must(await enc(B, encId1), 'B view').partner_confirmed, 'partner sees the confirmation');
+const e2 = must(await enc(B, encId1, 'confirm'), 'B confirms');
+check(e2.status === 'playing' && e2.elapsed_secs >= 0 && e2.scene_secs > 0, 'both confirmed -> scene plays');
+const bLife0 = await cashOf(B);
+const e3 = must(await enc(B, encId1, 'complete'), 'B completes');
+check(e3.status === 'completed' && e3.outcome?.kind === 'encounter' && e3.outcome.money > 0 && !e3.outcome.repeat, `encounter outcome pays (₦${e3.outcome?.money}, +${e3.outcome?.xp} XP)`);
+const aLife1 = await cashOf(A);
+const again = must(await enc(A, encId1, 'complete'), 'A completes too (replay)');
+check(again.status === 'completed' && again.outcome.money === e3.outcome.money, 'second complete returns the same outcome');
+const aLife2 = await cashOf(A); const bLife1 = await cashOf(B);
+check(aLife2.money === aLife1.money && aLife2.xp === aLife1.xp, 'replaying completion pays nothing more');
+check(bLife1.xp === bLife0.xp + e3.outcome.xp, 'B got the encounter XP exactly once');
+check((await enc(A, encId1, 'leave')).ok && (await enc(A, encId1)).data.status === 'completed', 'leaving after the end keeps it completed');
+
+const privateEncounter = async () => {
+  const room = must(await call('POST', '/v1/social/private-room', A.token, { player_id: A.player_id, target_id: `player:${B.player_id}` }), 'A requests room');
+  const ok = must(await call('POST', `/v1/social/private-room/${room.room.id}/consent`, B.token, { player_id: B.player_id, action: 'accept' }), 'B accepts room');
+  check(!!ok.encounter_id, 'world private room opens an encounter');
+  return ok.encounter_id;
+};
+const playThrough = async (id) => { must(await enc(A, id, 'confirm'), 'A ok'); must(await enc(B, id, 'confirm'), 'B ok'); return must(await enc(A, id, 'complete'), 'complete'); };
+const encId2 = must(await call('GET', `/v1/social/private-room/${pr.room.id}?player_id=${A.player_id}`, A.token), 'pr status').encounter_id;
+check(!!encId2, 'the earlier accepted private room has an encounter');
+const r2 = await playThrough(encId2);
+check(r2.outcome.repeat && r2.outcome.money === 0 && r2.outcome.xp === 0, 'a repeat with the same partner inside 24h counts but pays nothing');
+await playThrough(await privateEncounter());
+
+const encLeft = await privateEncounter();
+must(await enc(A, encLeft, 'confirm'), 'A confirms');
+const left = must(await enc(B, encLeft, 'leave'), 'B leaves');
+check(left.status === 'left' && left.left_by_me, 'either side can leave before the scene');
+const aSeesLeft = must(await enc(A, encLeft), 'A sees left');
+check(aSeesLeft.status === 'left' && !aSeesLeft.left_by_me && !aSeesLeft.outcome, 'partner sees it ended, no outcome');
+check((await enc(A, encLeft, 'confirm')).status === 409 && (await enc(A, encLeft, 'complete')).status === 409, 'nothing continues after someone leaves');
+
+const statsOf = async (p) => must(await call('GET', `/v1/player/${p.player_id}/stats`, p.token), 'stats');
+const aStats = await statsOf(A);
+check(aStats.body_count === 1 && aStats.total_encounters === 3, `3 encounters with 1 partner = body count 1, total 3 (got ${aStats.body_count}/${aStats.total_encounters})`);
+check(aStats.dates_completed === 1 && aStats.reputation > 5 && aStats.reputation <= 10 && aStats.level_title, `stats: ${aStats.dates_completed} date, reputation ${aStats.reputation}, ${aStats.level_title}`);
+check(aStats.achievements.find(x => x.id === 'after_hours')?.unlocked_at && aStats.achievements.find(x => x.id === 'first_date')?.unlocked_at, 'achievements unlocked');
+check(aStats.cash_earned > 0 && aStats.cash_spent >= 0, `cash earned ₦${aStats.cash_earned}, spent ₦${aStats.cash_spent}`);
+const bStats = await statsOf(B);
+check(bStats.feedback.some(f => f.from_name === A.display_name && f.tags.includes('Funny')), 'rating history shows feedback received');
+check((await call('GET', `/v1/player/${B.player_id}/stats`, A.token)).status === 403, "you can't read someone else's private stats");
+const bPublic = (await threadOf(A, B)).stats;
+check(bPublic.reputation > 5 && bPublic.level >= 1 && bPublic.body_count == null && bPublic.encounters == null, 'body count and encounters are private by default');
+must(await call('POST', `/v1/player/${B.player_id}/stats/visibility`, B.token, { player_id: B.player_id, visibility: { ...bStats.visibility, body_count: true, reputation: false } }), 'B shares body count');
+const bPublic2 = (await threadOf(A, B)).stats;
+check(bPublic2.body_count === 1 && bPublic2.reputation == null, 'visibility toggles control what others see');
+const zaraRoom = must(await call('POST', '/v1/social/private-room', A.token, { player_id: A.player_id, target_id: 'npc:zara' }), 'A asks Zara somewhere private');
+check((await call('POST', `/v1/social/private-room/${zaraRoom.room.id}/consent`, A.token, { player_id: A.player_id, action: 'accept' })).status === 403, 'an NPC you barely know does not agree to a private room');
+log(`encounters ok: both confirm -> scene -> outcome once, repeats pay nothing, leave ends it; stats body ${aStats.body_count} / total ${aStats.total_encounters}, rep ${aStats.reputation}`);
+
+// ---- M8: Feed (spec 16): personal, from the event audit (async via NATS -> event worker) ----
+const feedOf = async (p) => must(await call('GET', `/v1/feed?player_id=${p.player_id}`, p.token), 'feed');
+const waitFeed = async (p, pred, label) => { for (let i = 0; i < 40; i++) { const f = await feedOf(p); if (pred(f)) return f; await sleep(250); } throw new Error(`check failed: ${label}`); };
+const aFeed = await waitFeed(A, (f) => f.items.some((i) => i.kind === 'encounter') && f.items.some((i) => i.kind === 'achievement'), 'A feed has encounter + achievement');
+check(aFeed.items.some((i) => i.kind === 'match' && i.title.includes(B.display_name) && i.action === `chat:player:${B.player_id}`), 'feed: match with B links to the chat');
+check(aFeed.items.some((i) => i.kind === 'date' && i.title.includes(B.display_name) && i.body === 'Sparks flew'), 'feed: finished date with its outcome');
+check(aFeed.items.filter((i) => i.action).length === aFeed.items.length, 'every feed item links somewhere');
+check(aFeed.items.some((i) => i.kind === 'npc' || i.kind === 'venue'), 'feed: world posts (NPC updates / venue announcements)');
+check(aFeed.unseen_count > 0, 'feed: unseen badge count');
+const bFeed = await waitFeed(B, (f) => f.items.some((i) => i.kind === 'feedback'), 'B feed has feedback');
+check(bFeed.items.some((i) => i.kind === 'invitation' && i.title.includes(A.display_name) && i.title.includes('Rooftop date')), 'feed: incoming invitation');
+const sFeed = await feedOf(S);
+check(!sFeed.items.some((i) => (i.title + i.body).includes(A.display_name) || (i.title + i.body).includes(B.display_name)), "feed never shows other people's activity");
+must(await call('POST', '/v1/feed/seen', A.token, { player_id: A.player_id }), 'feed seen');
+check((await feedOf(A)).unseen_count === 0, 'opening the feed clears the badge');
+log(`feed ok: ${aFeed.items.length} items for A (${[...new Set(aFeed.items.map((i) => i.kind))].join(', ')}), private to each player, badge clears`);
+
 // Block hides
 must(await call('POST', '/v1/moderation/block', B.token, { blocker_id: B.player_id, target_id: `player:${A.player_id}` }), 'block');
 const disc2 = must(await call('GET', `/v1/discovery?player_id=${A.player_id}&room_id=${roomA.id}`, A.token), 'discovery2');
@@ -254,6 +358,53 @@ const blockedDm = await call('POST', '/v1/messages/send', A.token, { player_id: 
 check(blockedDm.status === 404, `blocked players cannot DM (got ${blockedDm.status})`);
 check((await invite(A, B, 'venue_visit')).status === 404, 'blocked players cannot invite');
 check((await call('GET', `/v1/dates/${inv4.id}?player_id=${A.player_id}`, A.token)).status === 404, 'a block hides shared dates too');
+check((await enc(A, encId1)).status === 404, 'a block hides shared encounters too');
+check((await fb(B, inv4.id, ['Funny'])).status === 404, 'no feedback across a block');
+check(!(await feedOf(A)).items.some((i) => (i.title + i.body).includes(B.display_name)), 'a block removes them from your feed');
+
+// ---- M8: Settings & privacy (spec 18) ----
+const settingsOf = async (p) => must(await call('GET', `/v1/player/${p.player_id}/settings`, p.token), 'settings');
+const bSet = await settingsOf(B);
+check(bSet.email?.endsWith('@smoke.test') && bSet.member_since, 'settings show the account email and join date');
+check(Object.values(bSet.notifications).every((v) => v === true), 'alerts default to on');
+check(bSet.blocked.length === 1 && bSet.blocked[0].target_id === `player:${A.player_id}` && bSet.blocked[0].display_name === A.display_name, 'blocked list names who you blocked');
+check((await call('GET', `/v1/player/${B.player_id}/settings`, A.token)).status === 403, 'nobody else can read your settings');
+must(await call('POST', `/v1/player/${B.player_id}/settings/notifications`, B.token, { player_id: B.player_id, notifications: { messages: true, matches: false, invitations: true, feed: false } }), 'set alerts');
+const bSet2 = await settingsOf(B);
+check(!bSet2.notifications.feed && !bSet2.notifications.matches && bSet2.notifications.messages, 'alert preferences persist');
+check((await call('POST', '/v1/moderation/unblock', A.token, { blocker_id: B.player_id, target_id: `player:${A.player_id}` })).status === 403, 'only the blocker can unblock');
+must(await call('POST', '/v1/moderation/unblock', B.token, { blocker_id: B.player_id, target_id: `player:${A.player_id}` }), 'unblock');
+check((await settingsOf(B)).blocked.length === 0, 'unblock empties the list');
+check((await call('POST', '/v1/moderation/unblock', B.token, { blocker_id: B.player_id, target_id: `player:${A.player_id}` })).status === 404, 'unblocking twice is a 404');
+check((await call('POST', '/v1/social/interest', A.token, { player_id: A.player_id, target_id: `player:${B.player_id}` })).ok, 'after an unblock they can find each other again');
+// Password change
+const pw = (body) => call('POST', '/v1/account/password', B.token, { player_id: B.player_id, ...body });
+check((await pw({ current_password: 'wrong-password-123', new_password: 'another-good-password' })).status === 403, 'wrong current password -> 403');
+check((await pw({ current_password: 'smoke-test-password', new_password: 'short' })).status === 400, 'short new password -> 400');
+must(await pw({ current_password: 'smoke-test-password', new_password: 'another-good-password' }), 'change password');
+check((await call('POST', '/v1/auth/login', null, { email: bSet.email, password: 'smoke-test-password' })).status === 401, 'old password stops working');
+must(await call('POST', '/v1/auth/login', null, { email: bSet.email, password: 'another-good-password' }), 'login with new password');
+// Account deletion
+const Gone = await makePlayer('Del' + Date.now() % 1000, ['Caring'], 'tee_white');
+const dEmail = (await settingsOf(Gone)).email;
+must(await call('POST', '/v1/social/interest', A.token, { player_id: A.player_id, target_id: `player:${Gone.player_id}` }), 'A likes Gone');
+must(await call('POST', '/v1/social/interest', Gone.token, { player_id: Gone.player_id, target_id: `player:${A.player_id}` }), 'Gone likes A');
+must(await call('POST', '/v1/messages/send', Gone.token, { player_id: Gone.player_id, target_id: `player:${A.player_id}`, message: 'bye for now' }), 'Gone messages A');
+must(await call('POST', '/v1/moderation/block', A.token, { blocker_id: A.player_id, target_id: `player:${Gone.player_id}` }), 'A blocks Gone');
+must(await call('POST', '/v1/moderation/report', A.token, { reporter_id: A.player_id, target_id: `player:${Gone.player_id}`, reason: 'smoke', details: null }), 'A reports Gone');
+const del = (p, body) => call('POST', '/v1/account/delete', p.token, { player_id: Gone.player_id, ...body });
+check((await del(Gone, { password: 'smoke-test-password', confirm: 'delete' })).status === 400, 'deletion needs the word DELETE');
+check((await del(Gone, { password: 'nope-nope-nope', confirm: 'DELETE' })).status === 403, 'deletion needs the password');
+check((await del(A, { password: 'smoke-test-password', confirm: 'DELETE' })).status === 403, "nobody can delete someone else's account");
+must(await del(Gone, { password: 'smoke-test-password', confirm: 'DELETE' }), 'delete account');
+check((await call('GET', '/v1/auth/verify', Gone.token)).status === 401, "a deleted account's session can't be restored");
+check((await call('POST', '/v1/auth/login', null, { email: dEmail, password: 'smoke-test-password' })).status === 401, 'a deleted account cannot sign in');
+check(!must(await call('GET', `/v1/social/matches?player_id=${A.player_id}`, A.token), 'A matches 4').some((m) => m.target_id === `player:${Gone.player_id}`), 'their matches are gone for the other side');
+check(!must(await call('GET', `/v1/messages/inbox?player_id=${A.player_id}`, A.token), 'A inbox 4').conversations.some((c) => c.target_id === `player:${Gone.player_id}`), 'their messages are gone for the other side');
+check(!(await settingsOf(A)).blocked.some((b) => b.target_id === `player:${Gone.player_id}`), "they leave others' blocked lists");
+const reRegistered = await call('POST', '/v1/auth/register', null, { email: dEmail, password: 'smoke-test-password', display_name: 'Again', date_of_birth: '1995-05-05', accept_terms: true });
+check(reRegistered.ok, 'the email can be used again after deletion');
+log('settings ok: alerts persist, blocked list + unblock, password change, account deletion cleans both sides');
 
 const bad = await call('GET', `/v1/npc/nobody/chat?player_id=${A.player_id}`, A.token);
 log('unknown npc ->', bad.status, bad.error);
