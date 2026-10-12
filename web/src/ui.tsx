@@ -199,7 +199,8 @@ export function ProfileCard({ data, actions }: { data: ProfileCardData; actions:
     <AvatarPortrait name={data.display_name} kind={data.kind} size={54} />
     <div className="profile-card-main">
       <strong>{data.display_name} <em className={`kind-badge ${data.kind}`}>{data.kind === 'npc' ? 'local' : 'player'}</em></strong>
-      <span>{data.compatibility}% match · rating {data.social_rating.toFixed(1)}</span>
+      {/* Players' rating is 0 when they keep their reputation private. */}
+      <span>{data.compatibility}% match{data.social_rating > 0 && ` · rating ${data.social_rating.toFixed(1)}`}</span>
       {data.kind === 'player' && data.bio && <p className="card-bio">“{data.bio}”</p>}
       <p>{data.looking_for}</p>
       {data.kind === 'player' && (!!data.interests?.length || data.relationship_style) && <div className="pill-row tight">
@@ -224,4 +225,12 @@ export function InvitationCard({ title, state, kicker, detail, actions }: { titl
       {actions.map((a) => <button key={a.label} className={a.variant === 'ghost' ? 'ghost' : ''} disabled={a.disabled} onClick={a.onClick}>{a.label}</button>)}
     </div>}
   </div>;
+}
+
+/** On/off row (public/private toggles in the creator and stats). */
+export function Toggle({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return <label className="switch-row">
+    <span><b>{label}</b>{hint && <em>{hint}</em>}</span>
+    <input type="checkbox" role="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+  </label>;
 }

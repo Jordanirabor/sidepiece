@@ -5,12 +5,15 @@ import { DEFAULT_LOOK, Look } from './look';
 import { labelOf, RELATIONSHIP_STYLES } from './prefs';
 import { Heart, Info, X } from 'lucide-react';
 import { EmptyState, ErrorState } from './ui';
+import { PublicStats, PublicStatsRow } from './Stats';
 
 /** Mirrors `DiscoverableProfile` (crates/common). */
 export type Card = {
   id: string; display_name: string; kind: 'npc' | 'player'; location: string; looking_for: string;
   compatibility: number; social_rating: number; bio?: string; interests?: string[];
   relationship_style?: string | null; open_to?: string[]; look?: Look; online?: boolean;
+  /** Players only: the stats they made public. */
+  stats?: PublicStats | null;
 };
 /** Mirrors `MatchView`. */
 export type Match = {
@@ -36,6 +39,7 @@ function CardFace({ card, myInterests, big }: { card: Card; myInterests: string[
     <div className="card-info">
       <h3>{card.display_name} <em className={`kind-badge ${card.kind}`}>{card.kind === 'npc' ? 'local' : 'player'}</em></h3>
       <span className={`card-where ${card.online ? 'on' : ''}`}>{where(card)}</span>
+      {big && <PublicStatsRow stats={card.stats} />}
       {card.bio && <p className="card-bio-big">{card.kind === 'player' ? `“${card.bio}”` : card.bio}</p>}
       <div className="pill-row tight">
         {card.relationship_style && <span className="pill">{labelOf(RELATIONSHIP_STYLES, card.relationship_style)}</span>}

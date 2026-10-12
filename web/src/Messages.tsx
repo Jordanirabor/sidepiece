@@ -4,6 +4,7 @@ import { EmptyState, ErrorState, Sheet } from './ui';
 import { DEFAULT_LOOK, Look } from './look';
 import { Preview } from './Creator';
 import { InviteCard, Invitation } from './Invites';
+import { PublicStats, PublicStatsRow } from './Stats';
 
 export type Conversation = {
   target_id: string; display_name: string; kind: 'player' | 'npc'; look?: Look; last_message: string;
@@ -15,6 +16,7 @@ export type DmMessage = { id: string; sender_id: string; recipient_id: string; c
 export type DmThread = {
   target_id: string; display_name: string; look?: Look; online: boolean; location: string; venue: string;
   muted: boolean; ended: boolean; messages: DmMessage[]; open_to?: string[]; invitations?: Invitation[];
+  stats?: PublicStats;
 };
 
 function timeAgo(iso: string) {
@@ -130,6 +132,7 @@ export function DmProfileSheet({
   return <Sheet title={thread.display_name} subtitle={thread.online ? `● ${thread.location}` : 'Offline'} onClose={onClose}>
     <div className="dm-profile">
       <div className="card-portrait player"><Preview look={thread.look ?? DEFAULT_LOOK} framing="full" interactive={false} /></div>
+      <PublicStatsRow stats={thread.stats} />
       <p className="deck-hint">You matched. Only what {thread.display_name} chose to share is shown.</p>
       <div className="dm-profile-actions">
         <button disabled={!canMeet} onClick={() => onMeet(thread.venue)}>{canMeet ? `Meet at ${thread.location}` : thread.online ? 'Busy right now' : 'Offline right now'}</button>

@@ -6,7 +6,7 @@
 //! relationship affinity exactly once (the beat-advancing update only succeeds for one request).
 
 use super::{
-    AppError, SharedState, chat, hidden_targets, life, messages, npcs, publish_event,
+    AppError, SharedState, chat, hidden_targets, life, messages, npcs, progress, publish_event,
     require_player,
 };
 use axum::{
@@ -16,7 +16,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
-use sidepiece_common::{ApiOk, AvatarLook, DateLine, DateOutcome, DateView, RelationshipStats};
+use sidepiece_common::{ApiOk, AvatarLook, DateLine, DateView};
 use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -94,7 +94,7 @@ pub const SCENES: &[SceneScript] = &[
         goal: 9,
         beats: &[
             Beat {
-                prompt: "You grab a high table near the bar at Ikoyi Lounge. The bass is low enough to talk. {partner} leans in.",
+                prompt: "You grab a high table near the bar at Club 57. The bass is low enough to talk. {partner} leans in.",
                 choices: [
                     c("“You look good under neon.”", 3),
                     c("“Okay, what are we drinking? My shout.”", 2),
@@ -130,28 +130,47 @@ pub fn npc_pick(affinity: i32) -> usize {
     if affinity >= 40 { 0 } else { 1 }
 }
 
-/// Outcome and one-time rewards for a finished date. Dates are a full progression path on their own (spec 13).
+/// How a finished date went, and what each side earns once. Dates are a full progression path on their own
+/// (spec 13), so even a rough one pays a little.
+pub struct DateOutcome {
+    pub label: &'static str,
+    pub summary: &'static str,
+    pub money: i32,
+    pub xp: i32,
+    pub affinity: i32,
+    pub objective_met: bool,
+}
+
 pub fn outcome(chemistry: i32, goal: i32) -> DateOutcome {
-    let (label, summary, xp, affinity) = if chemistry >= goal {
+    let (label, summary, money, xp, affinity) = if chemistry >= goal {
         (
             "Sparks flew",
             "You were both fully there. This one's going somewhere.",
+            5_000,
             35,
             8,
         )
     } else if chemistry * 2 >= goal {
-        ("A good night", "Easy company and a few real laughs.", 20, 4)
+        (
+            "A good night",
+            "Easy company and a few real laughs.",
+            3_000,
+            20,
+            4,
+        )
     } else {
         (
             "Just friends tonight",
             "Not every night clicks, and that's fine.",
+            1_500,
             10,
             1,
         )
     };
     DateOutcome {
-        label: label.into(),
-        summary: summary.into(),
+        label,
+        summary,
+        money,
         xp,
         affinity,
         objective_met: chemistry >= goal,
@@ -271,7 +290,7 @@ async fn load_for(
     Ok((row, mine, partner, host))
 }
 
-async fn partner_identity(
+pub(crate) async fn partner_identity(
     state: &SharedState,
     partner: &str,
 ) -> Result<(String, String, Option<AvatarLook>), AppError> {
@@ -287,6 +306,7 @@ async fn partner_identity(
 async fn view(
     state: &SharedState,
     row: &DateRow,
+    me: Uuid,
     mine: &str,
     partner: &str,
     host: bool,
@@ -357,19 +377,16 @@ async fn view(
         history,
         status: row.status.clone(),
         left_by_me: row.left_by.as_deref() == Some(mine),
-        outcome: (row.status == "completed").then(|| outcome(row.chemistry, script.goal)),
+        outcome: if row.status == "completed" {
+            progress::outcome_for(state, row.id, me, &partner_name).await?
+        } else {
+            None
+        },
     })
 }
 
-pub async fn get_date(
-    State(state): State<SharedState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Query(q): Query<PlayerQuery>,
-) -> Result<Json<ApiOk<DateView>>, AppError> {
-    require_player(&state, &headers, q.player_id)?;
-    let (row, mine, partner, host) = load_for(&state, id, q.player_id).await?;
-    // Polling the date is the presence heartbeat.
+/// Polling or acting in the date shows this side is still there (partner drop-off detection).
+async fn heartbeat(state: &SharedState, id: Uuid, host: bool) -> Result<(), AppError> {
     let column = if host {
         "host_seen_at"
     } else {
@@ -381,8 +398,20 @@ pub async fn get_date(
     .bind(id)
     .execute(&state.db)
     .await?;
+    Ok(())
+}
+
+pub async fn get_date(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Query(q): Query<PlayerQuery>,
+) -> Result<Json<ApiOk<DateView>>, AppError> {
+    require_player(&state, &headers, q.player_id)?;
+    let (row, mine, partner, host) = load_for(&state, id, q.player_id).await?;
+    heartbeat(&state, id, host).await?;
     Ok(Json(ApiOk::new(
-        view(&state, &row, &mine, &partner, host).await?,
+        view(&state, &row, q.player_id, &mine, &partner, host).await?,
     )))
 }
 
@@ -394,6 +423,7 @@ pub async fn choose(
 ) -> Result<Json<ApiOk<DateView>>, AppError> {
     require_player(&state, &headers, req.player_id)?;
     let (row, mine, partner, host) = load_for(&state, id, req.player_id).await?;
+    heartbeat(&state, id, host).await?;
     if row.status != "active" {
         return Err(AppError::conflict("this date has ended"));
     }
@@ -465,36 +495,14 @@ pub async fn choose(
     }
     let row = load(&state, id).await?;
     Ok(Json(ApiOk::new(
-        view(&state, &row, &mine, &partner, host).await?,
+        view(&state, &row, req.player_id, &mine, &partner, host).await?,
     )))
-}
-
-async fn bump_relationship(
-    state: &SharedState,
-    player: Uuid,
-    target: &str,
-    affinity: i32,
-    sparks: bool,
-) -> Result<(), AppError> {
-    let mut stats: RelationshipStats = chat::load_stats(state, player, target).await?;
-    stats.affinity = (stats.affinity + affinity).clamp(0, 100);
-    stats.trust = (stats.trust + 1).clamp(0, 100);
-    stats.attraction = (stats.attraction + if sparks { 3 } else { 1 }).clamp(0, 100);
-    sqlx::query(
-        "insert into relationship_state (player_id, target_id, stats) values ($1, $2, $3)
-         on conflict (player_id, target_id) do update set stats = excluded.stats, updated_at = now()",
-    )
-    .bind(player)
-    .bind(target)
-    .bind(serde_json::to_value(&stats)?)
-    .execute(&state.db)
-    .await?;
-    Ok(())
 }
 
 async fn reward(state: &SharedState, row: &DateRow, chemistry: i32) -> Result<(), AppError> {
     let out = outcome(chemistry, row.scene.goal);
     let delta = life::LifeDelta {
+        money: out.money,
         xp: out.xp,
         mood: 10.0,
         social: 12.0,
@@ -506,8 +514,36 @@ async fn reward(state: &SharedState, row: &DateRow, chemistry: i32) -> Result<()
         players.push((guest, format!("player:{}", row.host_id)));
     }
     for (player, other) in players {
-        life::apply(state, player, delta).await?;
-        bump_relationship(state, player, &other, out.affinity, out.objective_met).await?;
+        let granted = progress::grant(
+            state,
+            progress::Grant {
+                source_id: row.id,
+                player,
+                kind: "date",
+                partner: &other,
+                label: out.label,
+                summary: out.summary,
+                objective_met: out.objective_met,
+                repeat: false,
+                life: delta,
+                affinity: out.affinity,
+            },
+        )
+        .await?;
+        if granted {
+            progress::bump_relationship(state, player, &other, out.affinity, out.objective_met)
+                .await?;
+            if other.starts_with("npc:") {
+                progress::npc_feedback(
+                    state,
+                    row.id,
+                    &other,
+                    player,
+                    chemistry * 2 >= row.scene.goal,
+                )
+                .await?;
+            }
+        }
     }
     publish_event(
         state,
@@ -551,7 +587,7 @@ pub async fn leave(
     }
     let row = load(&state, id).await?;
     Ok(Json(ApiOk::new(
-        view(&state, &row, &mine, &partner, host).await?,
+        view(&state, &row, req.player_id, &mine, &partner, host).await?,
     )))
 }
 

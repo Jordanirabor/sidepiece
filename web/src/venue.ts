@@ -1,5 +1,10 @@
+import '@babylonjs/loaders/glTF';
 import {
   AbstractMesh,
+  LoadAssetContainerAsync,
+  MirrorTexture,
+  Plane,
+  PBRMaterial,
   Color3,
   DynamicTexture,
   GlowLayer,
@@ -13,6 +18,8 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import { ACCESSORIES, BOTTOMS, findItem, hexRgb, Look, skinRgb, TOPS } from './look';
+import { buildCity, tuneLagosMaterial } from './city';
+import { Club, clubOf } from './venues';
 import { addFloorReflection, addKeyShadows, applySurface, contactShadow, quality } from './render';
 
 export type Portal = { kind: string; label: string; position: Vector3 };
@@ -21,12 +28,26 @@ export type VenueHandles = {
   bounds: { x: number; z: number };
   playerSpawn: Vector3;
   portals: Portal[];
-  animate: (t: number) => void;
+  animate: (t: number, dt: number) => void;
   /** Register a mesh as a shadow caster for the venue's key light (no-op on low quality). */
   castShadow: (mesh: AbstractMesh) => void;
+  /** Resolves once streamed assets (the city kit) are in the scene. */
+  ready?: Promise<void>;
+  /** Camera limits for big outdoor spaces. */
+  camera?: { upperRadius?: number; maxZ?: number; /** Initial heading (ArcRotate alpha); default looks +Z. */ alpha?: number };
+  /** Slide a move from `from` to `to` along walls and water; returns where the player actually ends up. */
+  collide?: (from: Vector3, to: Vector3) => Vector3;
+  /** Game-clock hour (0..24, fractional) for outdoor lighting. */
+  setHour?: (hour: number) => void;
+  /** Waypoints for a walk from `from` to `to` around buildings (tap-to-move). */
+  route?: (from: Vector3, to: Vector3) => Vector3[];
+  /** The building a ray hits first: where to walk to (its door) and the venue it opens, if any. */
+  pick?: (origin: Vector3, dir: Vector3, from: Vector3) => { point: Vector3; portal?: string; distance: number } | null;
+  /** How far the camera can sit from `target` towards `camPos` before a building gets in the way. */
+  occlude?: (target: Vector3, camPos: Vector3) => number;
 };
 
-type VenueBuild = Omit<VenueHandles, 'castShadow'>;
+type VenueBuild = Omit<VenueHandles, 'castShadow'> & { roomMeshes?: AbstractMesh[] };
 
 export function material(scene: Scene, name: string, color: Color3, emissive = Color3.Black()) {
   const mat = new StandardMaterial(name, scene);
@@ -356,282 +377,249 @@ export function addLagosSkyline(scene: Scene, opts: { z: number; y: number; widt
 
 /** Per-venue key light: direction, colour and strength of the shadow-casting light (ADR 0012). */
 const KEY_LIGHTS: Record<string, { direction: Vector3; intensity: number; color: Color3; area: number }> = {
-  city: { direction: new Vector3(0.35, -1, 0.45), intensity: 0.32, color: new Color3(0.62, 0.66, 1), area: 24 },
-  neon_lounge: { direction: new Vector3(-0.25, -1, 0.3), intensity: 0.28, color: new Color3(1, 0.62, 0.86), area: 12 },
-  rooftop_party: { direction: new Vector3(0, -0.7, 1), intensity: 0.45, color: new Color3(1, 0.62, 0.38), area: 14 },
+  lounge: { direction: new Vector3(-0.25, -1, 0.3), intensity: 0.28, color: new Color3(1, 0.62, 0.86), area: 12 },
+  rooftop: { direction: new Vector3(0, -0.7, 1), intensity: 0.45, color: new Color3(1, 0.62, 0.38), area: 14 },
   private_room: { direction: new Vector3(0.2, -1, 0.25), intensity: 0.3, color: new Color3(1, 0.55, 0.5), area: 6 },
 };
 
-export function buildVenue(scene: Scene, kind: string): VenueHandles {
+/** `from` is the venue you just left: back in the city you come out of its door. */
+export function buildVenue(scene: Scene, kind: string, from?: string): VenueHandles {
+  if (kind === 'city') return buildCity(scene, from);
   const glow = new GlowLayer('venue-glow', scene);
   glow.intensity = 0.55;
   const ambient = new HemisphericLight('ambient', new Vector3(0, 1, 0), scene);
 
-  const build = kind === 'city' ? buildCity(scene, glow, ambient)
-    : kind === 'rooftop_party' ? buildRooftop(scene, glow, ambient)
-    : kind === 'private_room' ? buildPrivateRoom(scene, glow, ambient)
-    : buildLounge(scene, glow, ambient);
-  const shadows = addKeyShadows(scene, KEY_LIGHTS[kind] ?? KEY_LIGHTS.neon_lounge);
+  const club = clubOf(kind) ?? clubOf('neon_lounge')!;
+  const open = club.style === 'rooftop' || club.style === 'beach';
+  const build = kind === 'private_room' ? buildPrivateRoom(scene, glow, ambient)
+    : club.style === 'beach' ? buildBeach(scene, glow, ambient, club)
+    : open ? buildRooftop(scene, glow, ambient, club)
+    : buildLounge(scene, glow, ambient, club);
+  const shadows = addKeyShadows(scene, KEY_LIGHTS[kind === 'private_room' ? kind : open ? 'rooftop' : 'lounge']);
+  build.ready?.then(() => build.roomMeshes?.forEach((m) => shadows.cast(m)));
   return { ...build, castShadow: shadows.cast };
 }
 
+/** The club's name in neon over the back wall. */
+function clubSign(scene: Scene, club: Club, at: Vector3) {
+  const sign = makeLabel(scene, 'club-sign', club.name.toUpperCase(), { color: club.color, bg: 'none', width: 6, height: 1.1, font: 72, billboard: false });
+  sign.position = at;
+  return sign;
+}
+
 /** Exit door mounted on the left (-X) wall, facing into the room. */
-function exitDoor(scene: Scene, wallX: number, z: number): Portal {
+function exitDoor(scene: Scene, wallX: number, z: number, club: Club): Portal {
   const frame = MeshBuilder.CreateBox('exit-door', { width: 0.1, height: 2.3, depth: 1.4 }, scene);
   frame.position = new Vector3(wallX + 0.06, 1.15, z);
-  frame.material = material(scene, 'exit-door-mat', new Color3(0.05, 0.05, 0.08), new Color3(0.02, 0.35, 0.45));
-  const sign = makeLabel(scene, 'exit-sign', 'EXIT → LEKKI', { color: '#8defff', bg: 'none', width: 1.8, height: 0.45, billboard: false });
+  frame.material = material(scene, 'exit-door-mat', new Color3(0.06, 0.06, 0.08), new Color3(0.01, 0.12, 0.16));
+  const sign = makeLabel(scene, 'exit-sign', `EXIT → ${club.area.toUpperCase()}`, { color: '#8defff', bg: 'none', width: 2.6, height: 0.45, billboard: false });
   sign.position = new Vector3(wallX + 0.12, 2.65, z);
   sign.rotation.y = -Math.PI / 2;
   const marker = MeshBuilder.CreateDisc('exit-marker', { radius: 0.7, tessellation: 24 }, scene);
   marker.rotation.x = Math.PI / 2;
   marker.position = new Vector3(wallX + 1.0, 0.02, z);
-  marker.material = material(scene, 'exit-marker-mat', Color3.Black(), new Color3(0.02, 0.3, 0.38));
-  return { kind: 'city', label: 'Lekki Phase 1', position: new Vector3(wallX + 1.0, 0, z) };
+  marker.material = material(scene, 'exit-marker-mat', Color3.Black(), new Color3(0.02, 0.2, 0.26));
+  return { kind: 'city', label: club.street, position: new Vector3(wallX + 1.0, 0, z) };
 }
 
-function buildCity(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
-  scene.clearColor.set(0.06, 0.04, 0.14, 1);
-  ambient.intensity = 0.5;
-  ambient.diffuse = new Color3(0.62, 0.58, 1);
-  ambient.groundColor = new Color3(0.22, 0.12, 0.3);
-  scene.fogMode = Scene.FOGMODE_EXP2;
-  scene.fogDensity = 0.018;
-  scene.fogColor = new Color3(0.06, 0.04, 0.14);
-
-  // Street lamps down both sidewalks.
-  for (const side of [-1, 1]) {
-    for (let z = -16; z <= 16; z += 8) {
-      const pole = MeshBuilder.CreateCylinder(`lamp-${side}-${z}`, { diameter: 0.09, height: 3.6 }, scene);
-      pole.position = new Vector3(side * 6.3, 1.8, z + side * 2);
-      const poleMat = material(scene, `lamp-mat-${side}-${z}`, new Color3(0.08, 0.08, 0.1));
-      poleMat.specularColor = new Color3(0.6, 0.6, 0.7);
-      poleMat.specularPower = 96;
-      pole.material = poleMat;
-      const bulb = MeshBuilder.CreateSphere(`lamp-bulb-${side}-${z}`, { diameter: 0.32 }, scene);
-      bulb.position = new Vector3(side * 6.3, 3.65, z + side * 2);
-      bulb.material = material(scene, `lamp-bulb-mat-${side}-${z}`, Color3.Black(), new Color3(1, 0.85, 0.6));
-      const light = new PointLight(`lamp-light-${side}-${z}`, bulb.position.clone(), scene);
-      light.diffuse = new Color3(1, 0.82, 0.6);
-      light.intensity = 1.25;
-      light.range = 11;
+/**
+ * A room from the venue kit (`public/world/venues.glb`, built in Blender: scripts/blender). Its `neon` and `neon2`
+ * accents take the club's two colours; `dancefloor` panels pulse. Resolves with the room's meshes.
+ */
+function loadRoom(scene: Scene, name: string, club: Club) {
+  const accents: { mat: PBRMaterial; base: Color3; pulse: boolean }[] = [];
+  const meshes: AbstractMesh[] = [];
+  const ready = LoadAssetContainerAsync('/world/venues.glb', scene).then((c) => {
+    if (scene.isDisposed) return;
+    c.addAllToScene();
+    const root = c.meshes.find((m) => m.name === '__root__');
+    for (const holder of root?.getChildren() ?? []) {
+      if (holder.name === name) meshes.push(...(holder as TransformNode).getChildMeshes(false));
+      else holder.dispose(false, false);
     }
-  }
-
-  const street = MeshBuilder.CreateGround('street', { width: 12, height: 44 }, scene);
-  const streetMat = applySurface(material(scene, 'street-mat', new Color3(0.2, 0.19, 0.24)), 'asphalt', [3, 11], { gloss: 72, specular: 0.5 });
-  street.material = streetMat;
-  addFloorReflection(scene, street, streetMat, 0.9);
-  for (const side of [-1, 1]) {
-    const walk = MeshBuilder.CreateBox(`sidewalk-${side}`, { width: 3, height: 0.12, depth: 44 }, scene);
-    walk.position = new Vector3(side * 7.5, 0.06, 0);
-    walk.material = applySurface(material(scene, `sidewalk-mat-${side}`, new Color3(0.36, 0.34, 0.4)), 'concrete', [1, 11], { gloss: 24, specular: 0.15 });
-  }
-  for (let z = -20; z <= 20; z += 4) {
-    const dash = MeshBuilder.CreateBox(`dash-${z}`, { width: 0.12, height: 0.01, depth: 1.6 }, scene);
-    dash.position = new Vector3(0, 0.01, z);
-    dash.material = material(scene, `dash-mat-${z}`, Color3.Black(), new Color3(0.42, 0.38, 0.2));
-  }
-
-  const signs: { mat: StandardMaterial; base: Color3 }[] = [];
-  const neon = ['#ff2f91', '#8defff', '#b934ff', '#ffb02e', '#3fdc8f'];
-  for (const side of [-1, 1]) {
-    for (let i = 0; i < 6; i++) {
-      const h = 8 + ((i * 5 + (side > 0 ? 3 : 0)) % 9);
-      const b = MeshBuilder.CreateBox(`bldg-${side}-${i}`, { width: 5, height: h, depth: 6.5 }, scene);
-      b.position = new Vector3(side * 11.5, h / 2, -18 + i * 7.2);
-      b.material = applySurface(material(scene, `bldg-mat-${side}-${i}`, new Color3(0.2, 0.17, 0.3), new Color3(0.03, 0.02, 0.06)), 'plaster', [2, Math.ceil(h / 3)], { gloss: 16, specular: 0.08 });
-      // lit windows
-      for (let r = 0; r < Math.floor(h / 2.2); r++) {
-        const win = MeshBuilder.CreatePlane(`win-${side}-${i}-${r}`, { width: 3.6, height: 0.5 }, scene);
-        win.position = new Vector3(side * 8.98, 3 + r * 2.1, -18 + i * 7.2);
-        win.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
-        win.material = material(scene, `win-mat-${side}-${i}-${r}`, Color3.Black(), (i + r) % 4 === 0 ? new Color3(0.9, 0.7, 0.4) : new Color3(0.22 + ((i + r) % 3) * 0.08, 0.18, 0.4));
+    for (const m of c.materials as PBRMaterial[]) {
+      tuneLagosMaterial(m);
+      // Range-based falloff like the StandardMaterial lights the venues are lit with.
+      m.usePhysicalLightFalloff = false;
+      m.maxSimultaneousLights = quality() === 'high' ? 8 : 4;
+      const [base, variant] = m.name.split('.');
+      if (base === 'neon' || base === 'neon2' || base === 'dancefloor') {
+        const col = Color3.FromHexString(base === 'neon2' || variant === 'b' ? club.accent : club.color);
+        m.albedoColor = Color3.Black();
+        m.emissiveColor = col.scale(variant === 'dim' ? 0.16 : base === 'dancefloor' ? 0.28 : 0.8);
+        accents.push({ mat: m, base: m.emissiveColor.clone(), pulse: base === 'dancefloor' });
+      } else if (base === 'terrazzo' && quality() === 'high') {
+        // Polished floor: a blurred planar reflection of the bar, the neon and the people on it.
+        const mirror = new MirrorTexture(`${name}-floor-mirror`, 1024, scene, true);
+        mirror.mirrorPlane = new Plane(0, -1, 0, 0);
+        mirror.adaptiveBlurKernel = 12;
+        mirror.level = 0.35;
+        mirror.renderList = scene.meshes.filter((x) => !x.material?.name.startsWith('terrazzo'));
+        scene.onNewMeshAddedObservable.add((x) => mirror.renderList?.push(x));
+        m.reflectionTexture = mirror;
       }
-      const c = hexRgb(neon[(i + (side > 0 ? 2 : 0)) % neon.length]);
-      const strip = MeshBuilder.CreateBox(`neon-${side}-${i}`, { width: 0.08, height: 0.08, depth: 5.6 }, scene);
-      strip.position = new Vector3(side * 8.96, 3.2, -18 + i * 7.2);
-      const base = new Color3(c[0], c[1], c[2]);
-      const m = material(scene, `neon-mat-${side}-${i}`, Color3.Black(), base);
-      strip.material = m;
-      signs.push({ mat: m, base });
     }
-  }
-
-  const venueDoor = (kind: string, signText: string, label: string, color: string, x: number, z: number) => {
-    const side = Math.sign(x);
-    const door = MeshBuilder.CreateBox(`door-${kind}`, { width: 0.12, height: 2.6, depth: 2 }, scene);
-    door.position = new Vector3(x, 1.3, z);
-    const c = hexRgb(color);
-    door.material = material(scene, `door-mat-${kind}`, new Color3(0.04, 0.03, 0.06), new Color3(c[0] * 0.75, c[1] * 0.75, c[2] * 0.75));
-    // glowing floor marker so the entrance reads from a distance
-    const mat = MeshBuilder.CreateDisc(`door-marker-${kind}`, { radius: 1.1, tessellation: 32 }, scene);
-    mat.rotation.x = Math.PI / 2;
-    mat.position = new Vector3(x - side * 1.3, 0.14, z);
-    mat.material = material(scene, `door-marker-mat-${kind}`, Color3.Black(), new Color3(c[0] * 0.6, c[1] * 0.6, c[2] * 0.6));
-    const sign = makeLabel(scene, `sign-${kind}`, signText, { color, bg: 'none', width: 4.2, height: 0.9, font: 64, billboard: false });
-    sign.position = new Vector3(x - side * 0.05, 3.9, z);
-    sign.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
-    const light = new PointLight(`door-light-${kind}`, new Vector3(x - side * 1.5, 3, z), scene);
-    light.diffuse = new Color3(c[0], c[1], c[2]);
-    light.intensity = 1.4;
-    light.range = 7;
-    return { kind, label, position: new Vector3(x - side * 1.2, 0, z) };
+    for (const m of meshes) m.isPickable = false;
+  });
+  const animate = (t: number) => {
+    accents.forEach((a, i) => { if (a.pulse) a.mat.emissiveColor = a.base.scale(0.55 + 0.45 * Math.max(0, Math.sin(t * 6.3 + i * 1.9))); });
   };
+  return { ready, meshes, animate };
+}
 
-  // The street ends at the lagoon: promenade wall, then the Lagos skyline and link bridge.
-  const promenade = MeshBuilder.CreateBox('promenade', { width: 18, height: 0.7, depth: 0.4 }, scene);
-  promenade.position = new Vector3(0, 0.35, 22);
-  promenade.material = material(scene, 'promenade-mat', new Color3(0.22, 0.2, 0.28), new Color3(0.05, 0.03, 0.08));
-  const skyline = addLagosSkyline(scene, { z: 40, y: -0.8, width: 140 });
-
-  const portals: Portal[] = [
-    venueDoor('neon_lounge', 'IKOYI LOUNGE', 'Ikoyi Lounge', '#ff2f91', -8.95, -3.6),
-    venueDoor('rooftop_party', 'VI ROOFTOP ↑', 'Victoria Island Rooftop', '#ffb02e', 8.95, 3.6),
-  ];
-
-  return {
-    bounds: { x: 8.6, z: 20 },
-    playerSpawn: new Vector3(0, 0, -12),
-    portals,
-    animate: (t) => {
-      glow.intensity = 0.5 + Math.sin(t * 1.7) * 0.07;
-      skyline(t);
-      signs.forEach(({ mat, base }, i) => {
-        const flicker = 0.75 + Math.sin(t * (2 + (i % 3)) + i) * 0.25;
-        mat.emissiveColor = base.scale(flicker);
-      });
-    },
+/** Keeps the player out of furniture: axis-aligned rectangles [x0, z0, x1, z1] inside the room's bounds. */
+function furniture(bounds: { x: number; z: number }, rects: [number, number, number, number][]) {
+  const R = 0.3;
+  const blocked = (x: number, z: number) => Math.abs(x) > bounds.x || Math.abs(z) > bounds.z
+    || rects.some(([x0, z0, x1, z1]) => x > x0 - R && x < x1 + R && z > z0 - R && z < z1 + R);
+  return (from: Vector3, to: Vector3) => {
+    if (!blocked(to.x, to.z)) return to;
+    if (!blocked(to.x, from.z)) return new Vector3(to.x, to.y, from.z);
+    if (!blocked(from.x, to.z)) return new Vector3(from.x, to.y, to.z);
+    return from;
   };
 }
 
-function buildLounge(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
+function buildLounge(scene: Scene, glow: GlowLayer, ambient: HemisphericLight, club: Club): VenueBuild {
+  const main = Color3.FromHexString(club.color);
+  const second = Color3.FromHexString(club.accent);
   scene.clearColor.set(0.02, 0.02, 0.05, 1);
-  ambient.intensity = 0.6;
+  ambient.intensity = 0.55;
   ambient.groundColor = new Color3(0.12, 0.06, 0.16);
-  const pink = new PointLight('pink', new Vector3(-4, 5, -2), scene);
-  pink.diffuse = new Color3(1, 0.1, 0.55);
-  pink.intensity = 1.1;
+  const pink = new PointLight('pink', new Vector3(-4, 3.8, -2), scene);
+  pink.diffuse = main;
+  pink.intensity = 1.0;
   pink.range = 16;
-  const cyan = new PointLight('cyan', new Vector3(4, 4, 3), scene);
-  cyan.diffuse = new Color3(0, 0.85, 1);
-  cyan.intensity = 0.9;
+  const cyan = new PointLight('cyan', new Vector3(4, 3.6, 3), scene);
+  cyan.diffuse = second;
+  cyan.intensity = 0.8;
   cyan.range = 16;
+  // Warm pendants over the bar, like the reference's lounge.
+  const bar = new PointLight('bar-light', new Vector3(0, 2.2, 5.0), scene);
+  bar.diffuse = new Color3(1, 0.78, 0.52);
+  bar.intensity = 0.9;
+  bar.range = 6;
 
-  const floor = MeshBuilder.CreateGround('floor', { width: 16, height: 16 }, scene);
-  const floorMat = applySurface(material(scene, 'floor-mat', new Color3(0.17, 0.15, 0.24)), 'tile', [4, 4], { gloss: 96, specular: 0.6 });
-  floor.material = floorMat;
-  addFloorReflection(scene, floor, floorMat, 0.8);
-  const back = MeshBuilder.CreateBox('back-wall', { width: 16, height: 4, depth: 0.12 }, scene);
-  back.position = new Vector3(0, 2, 7.9);
-  back.material = applySurface(material(scene, 'back-mat', new Color3(0.11, 0.07, 0.2)), 'plaster', [4, 1]);
-  const left = MeshBuilder.CreateBox('left-wall', { width: 0.12, height: 4, depth: 16 }, scene);
-  left.position = new Vector3(-7.9, 2, 0);
-  left.material = applySurface(material(scene, 'left-mat', new Color3(0.08, 0.07, 0.16)), 'plaster', [4, 1]);
-
-  const bar = MeshBuilder.CreateBox('bar', { width: 5.8, height: 1.05, depth: 0.95 }, scene);
-  bar.position = new Vector3(0, 0.53, 5.4);
-  bar.material = applySurface(material(scene, 'bar-mat', new Color3(0.28, 0.16, 0.42)), 'wood', [2, 1], { gloss: 80, specular: 0.4 });
-  const barTop = MeshBuilder.CreateBox('bar-top', { width: 6, height: 0.06, depth: 1.08 }, scene);
-  barTop.position = new Vector3(0, 1.09, 5.4);
-  const barTopMat = material(scene, 'bar-top-mat', new Color3(0.05, 0.02, 0.08), new Color3(1, 0.05, 0.42));
-  barTop.material = barTopMat;
-
-  const dance = MeshBuilder.CreateCylinder('dance', { diameter: 4.2, height: 0.05, tessellation: 48 }, scene);
-  dance.position = new Vector3(1.8, 0.04, -1.4);
-  const danceMat = material(scene, 'dance-mat', new Color3(0.07, 0.05, 0.14), new Color3(0.02, 0.2, 0.35));
-  dance.material = danceMat;
-
-  for (let i = 0; i < 5; i++) {
-    const table = MeshBuilder.CreateCylinder(`table-${i}`, { diameter: 0.9, height: 0.16, tessellation: 24 }, scene);
-    table.position = new Vector3(-5.5 + i * 2.2, 0.45, -5.2 + (i % 2) * 1.4);
-    table.material = material(scene, `table-mat-${i}`, new Color3(0.11, 0.07, 0.18), i % 2 ? new Color3(0, 0.25, 0.4) : new Color3(0.4, 0.02, 0.18));
-  }
-  for (let i = 0; i < 9; i++) {
-    const strip = MeshBuilder.CreateBox(`neon-${i}`, { width: 0.045, height: 0.045, depth: 12 }, scene);
-    strip.position = new Vector3(-7 + i * 1.75, 0.06, 0);
-    strip.material = material(scene, `neon-mat-${i}`, Color3.Black(), i % 2 ? new Color3(0, 0.8, 1) : new Color3(1, 0, 0.5));
-  }
-  const exit = exitDoor(scene, -7.85, -4.5);
+  const room = loadRoom(scene, 'lounge-room', club);
+  const exit = exitDoor(scene, -7.85, -4.5, club);
+  clubSign(scene, club, new Vector3(0, 3.75, 7.66));
+  const bounds = { x: 7.2, z: 7.2 };
 
   return {
-    bounds: { x: 7.2, z: 7.2 },
+    bounds,
     playerSpawn: new Vector3(-5.2, 0, -4.5),
     portals: [exit],
+    ready: room.ready,
+    roomMeshes: room.meshes,
+    collide: furniture(bounds, [[-3.1, 4.8, 3.1, 8], [-2.8, 7.1, 2.8, 8], [-8, -0.6, -5.6, 3.6], [4.2, 6.2, 7.6, 8], [6.3, -2.6, 8, 2.6]]),
     animate: (t) => {
       glow.intensity = 0.4 + Math.sin(t * 2.2) * 0.06;
-      danceMat.emissiveColor = new Color3(0.02, 0.16 + Math.sin(t * 3) * 0.05, 0.32);
-      barTopMat.emissiveColor = new Color3(0.85 + Math.sin(t * 4) * 0.12, 0.04, 0.38);
+      room.animate(t);
+      pink.intensity = 0.9 + Math.max(0, Math.sin(t * 5.8)) * 0.25;
     },
   };
 }
 
-function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {
+function buildRooftop(scene: Scene, glow: GlowLayer, ambient: HemisphericLight, club: Club): VenueBuild {
   scene.clearColor.set(0.03, 0.015, 0.07, 1);
-  ambient.intensity = 0.38;
-  ambient.diffuse = new Color3(0.75, 0.6, 1);
+  ambient.intensity = 0.42;
+  ambient.diffuse = new Color3(0.75, 0.65, 1);
   ambient.groundColor = new Color3(0.25, 0.15, 0.2);
   const sunset = new PointLight('sunset', new Vector3(0, 6, 9), scene);
-  sunset.diffuse = new Color3(1, 0.45, 0.15);
-  sunset.intensity = 1.3;
+  sunset.diffuse = new Color3(1, 0.5, 0.2);
+  sunset.intensity = 1.1;
   sunset.range = 30;
+  const pool = new PointLight('pool-light', new Vector3(3.75, 0.6, 2.3), scene);
+  pool.diffuse = new Color3(0.2, 0.75, 1);
+  pool.intensity = 0.7;
+  pool.range = 6;
 
-  const deck = MeshBuilder.CreateGround('deck', { width: 18, height: 18 }, scene);
-  const deckMat = applySurface(material(scene, 'deck-mat', new Color3(0.36, 0.26, 0.2)), 'wood', [6, 6], { gloss: 40, specular: 0.25 });
-  deck.material = deckMat;
-  addFloorReflection(scene, deck, deckMat, 0.25);
-  const pool = MeshBuilder.CreateBox('pool', { width: 5, height: 0.08, depth: 3 }, scene);
-  pool.position = new Vector3(3.5, 0.04, 2.5);
-  const poolMat = material(scene, 'pool-mat', new Color3(0, 0.3, 0.4), new Color3(0, 0.35, 0.5));
-  pool.material = poolMat;
-
-  for (const [x, z, w, d] of [[0, 9, 18, 0.08], [0, -9, 18, 0.08], [9, 0, 0.08, 18], [-9, 0, 0.08, 18]] as const) {
-    const rail = MeshBuilder.CreateBox(`rail-${x}-${z}`, { width: w, height: 1, depth: d }, scene);
-    rail.position = new Vector3(x, 0.5, z);
-    const m = material(scene, `rail-mat-${x}-${z}`, new Color3(0.4, 0.5, 0.7));
-    m.alpha = 0.1;
-    m.specularColor = new Color3(0.9, 0.9, 1);
-    m.specularPower = 128;
-    rail.material = m;
-  }
+  const room = loadRoom(scene, 'rooftop-room', club);
   const skyline = addLagosSkyline(scene, { z: 60, y: -14, width: 180 });
-  for (let i = 0; i < 28; i++) {
-    const angle = (i / 28) * Math.PI * 2;
-    if (Math.sin(angle) > 0.5) continue; // the lagoon side stays open
-    const h = 3 + ((i * 7) % 9);
-    const tower = MeshBuilder.CreateBox(`tower-${i}`, { width: 1.6, height: h, depth: 1.6 }, scene);
-    tower.position = new Vector3(Math.cos(angle) * 22, h / 2 - 4, Math.sin(angle) * 22);
-    tower.material = material(scene, `tower-mat-${i}`, new Color3(0.05, 0.05, 0.12), new Color3(0.02, 0.015 + (i % 3) * 0.015, 0.05));
-  }
-  const bulbs: StandardMaterial[] = [];
-  for (let i = 0; i < 16; i++) {
-    const bulb = MeshBuilder.CreateSphere(`bulb-${i}`, { diameter: 0.18 }, scene);
-    bulb.position = new Vector3(-8 + i * 1.07, 3 + Math.sin(i * 0.6) * 0.25, -2);
-    const m = material(scene, `bulb-mat-${i}`, Color3.Black(), new Color3(1, 0.75, 0.35));
-    bulb.material = m;
-    bulbs.push(m);
-  }
-  const dj = MeshBuilder.CreateBox('dj', { width: 3, height: 1, depth: 1 }, scene);
-  dj.position = new Vector3(-4, 0.5, 6.5);
-  dj.material = material(scene, 'dj-mat', new Color3(0.1, 0.05, 0.15), new Color3(0.5, 0.1, 0.8));
-  poolMat.specularColor = new Color3(0.9, 0.95, 1);
-  poolMat.specularPower = 128;
-  const wall = MeshBuilder.CreateBox('stair-wall', { width: 0.2, height: 3, depth: 3 }, scene);
-  wall.position = new Vector3(-8.95, 1.5, -5);
-  wall.material = material(scene, 'stair-wall-mat', new Color3(0.12, 0.1, 0.16));
-  const exit = exitDoor(scene, -8.85, -5);
+  const bulbs = stringLights(scene, -8, 8, 3, -2);
+  const exit = exitDoor(scene, -8.85, -5, club);
+  clubSign(scene, club, new Vector3(4.5, 3.4, 8.55));
+  const bounds = { x: 8.4, z: 8.4 };
 
   return {
-    bounds: { x: 8.4, z: 8.4 },
+    bounds,
     playerSpawn: new Vector3(-6.4, 0, -5),
     portals: [exit],
+    ready: room.ready,
+    roomMeshes: room.meshes,
+    collide: furniture(bounds, [[1.2, 0.5, 6.3, 4.1], [2.0, 7.2, 7.0, 9], [-6.0, 7.1, -2.0, 9]]),
     animate: (t) => {
       glow.intensity = 0.5 + Math.sin(t * 1.5) * 0.06;
       skyline(t);
-      poolMat.emissiveColor = new Color3(0, 0.3 + Math.sin(t * 2) * 0.06, 0.5);
-      bulbs.forEach((m, i) => { m.emissiveColor = new Color3(1, 0.65 + Math.sin(t * 3 + i) * 0.15, 0.3); });
+      room.animate(t);
+      bulbs(t);
     },
   };
+}
+
+function buildBeach(scene: Scene, glow: GlowLayer, ambient: HemisphericLight, club: Club): VenueBuild {
+  scene.clearColor.set(0.04, 0.03, 0.09, 1);
+  ambient.intensity = 0.5;
+  ambient.diffuse = new Color3(0.62, 0.62, 0.95);
+  ambient.groundColor = new Color3(0.3, 0.22, 0.2);
+  const fire = new PointLight('fire', new Vector3(3, 1.2, -3), scene);
+  fire.diffuse = new Color3(1, 0.5, 0.15);
+  fire.intensity = 1.2;
+  fire.range = 9;
+  const barLight = new PointLight('beach-bar', new Vector3(4.4, 2.8, 7.6), scene);
+  barLight.diffuse = Color3.FromHexString(club.color);
+  barLight.intensity = 0.9;
+  barLight.range = 10;
+
+  const room = loadRoom(scene, 'beach-room', club);
+  // The Atlantic: dark water to the horizon with a moonlit sheen and a line of surf.
+  const sea = MeshBuilder.CreateGround('sea', { width: 400, height: 200 }, scene);
+  sea.position = new Vector3(0, -0.05, -110);
+  const seaMat = material(scene, 'sea-mat', new Color3(0.02, 0.05, 0.1), new Color3(0.01, 0.03, 0.07));
+  seaMat.specularColor = new Color3(0.6, 0.6, 0.8);
+  seaMat.specularPower = 96;
+  sea.material = seaMat;
+  const surf = MeshBuilder.CreateGround('surf', { width: 400, height: 1.2 }, scene);
+  surf.position = new Vector3(0, -0.02, -10.4);
+  const surfMat = material(scene, 'surf-mat', Color3.Black(), new Color3(0.55, 0.6, 0.7));
+  surfMat.alpha = 0.5;
+  surf.material = surfMat;
+  const bulbs = stringLights(scene, -8, 8, 3.4, 4.6);
+  const exit = exitDoor(scene, -8.85, -1.5, club);
+  clubSign(scene, club, new Vector3(4.4, 4.1, 6.5));
+  const bounds = { x: 8.4, z: 8.4 };
+
+  return {
+    bounds,
+    playerSpawn: new Vector3(-6.4, 0, -1.5),
+    portals: [exit],
+    ready: room.ready,
+    roomMeshes: room.meshes,
+    collide: furniture(bounds, [[1.4, 7.1, 7.4, 9], [-7.8, -6.4, -5.4, -4.0], [-4.6, -6.4, -2.2, -4.0], [1.6, -4.6, 4.4, -1.4]]),
+    animate: (t) => {
+      glow.intensity = 0.45;
+      room.animate(t);
+      bulbs(t);
+      fire.intensity = 1.1 + Math.sin(t * 13) * 0.08 + Math.sin(t * 7.1) * 0.06;
+      surf.position.z = -10.4 + Math.sin(t * 0.6) * 0.5;
+      surfMat.alpha = 0.35 + Math.sin(t * 0.6) * 0.15;
+    },
+  };
+}
+
+/** A sagging string of warm bulbs from x0 to x1 at height y along z. */
+function stringLights(scene: Scene, x0: number, x1: number, y: number, z: number) {
+  const mats: StandardMaterial[] = [];
+  for (let i = 0; i < 16; i++) {
+    const f = i / 15;
+    const bulb = MeshBuilder.CreateSphere(`bulb-${z}-${i}`, { diameter: 0.16, segments: 6 }, scene);
+    bulb.position = new Vector3(x0 + (x1 - x0) * f, y - Math.sin(Math.PI * f) * 0.5, z);
+    const m = material(scene, `bulb-mat-${z}-${i}`, Color3.Black(), new Color3(1, 0.75, 0.35));
+    bulb.material = m;
+    bulb.isPickable = false;
+    mats.push(m);
+  }
+  return (t: number) => mats.forEach((m, i) => { m.emissiveColor = new Color3(1, 0.65 + Math.sin(t * 3 + i) * 0.15, 0.3); });
 }
 
 function buildPrivateRoom(scene: Scene, glow: GlowLayer, ambient: HemisphericLight): VenueBuild {

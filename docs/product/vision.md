@@ -6,7 +6,7 @@
 
 ## One line
 
-**Side Piece is a mobile-first, web-based, semi-realistic 3D adult (18+) social world set in Lagos nightlife.**
+**Side Piece is a mobile-first, web-based, stylized 3D adult (18+) social world set in Lagos nightlife.**
 You build a character, enter the city, meet compatible people (real players and NPCs), flirt and chat,
 agree on dates and private experiences, and earn money, reputation and story.
 
@@ -35,7 +35,7 @@ the world clock (day/night) give the player reasons to work, eat, rest, go out a
 
 1. **Your character is your identity.** The creator matters (both client videos are entirely about it), and the
    same avatar appears everywhere: world, cards, chat headers, dates, profile.
-2. **A lively place, not a menu.** Small, populated, semi-realistic 3D venues (ADR 0012). Never leave a player in an empty room
+2. **A lively place, not a menu.** An open stylized Lagos to roam, with small, populated venues inside it (ADR 0017). Never leave a player in an empty room
    with no next step. NPCs fill gaps when players are scarce.
 3. **Conversation is gameplay.** NPC chat is free-text and every message is *scored*. Relationships move through
    visible tiers (Stranger → … → Best Friend → Partner).
@@ -69,6 +69,6 @@ designed to scale out.
 ## Non-goals (for now)
 
 - A massive seamless open world.
-- Photoreal avatars (we target semi-realistic, ADR 0012).
+- Photoreal avatars (we target a stylized look, ADR 0017).
 - Graphic sexual content.
 - Multiple currencies, loot boxes, complex crafting or a dozen half-finished venues.

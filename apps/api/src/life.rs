@@ -211,6 +211,11 @@ fn response(life: &LifeRow) -> LifeResponse {
     }
 }
 
+/// Current life state without changing anything.
+pub async fn current(state: &SharedState, player_id: Uuid) -> Result<LifeResponse, AppError> {
+    Ok(response(&load(state, player_id).await?))
+}
+
 /// Current cash (₦), for affordability checks before something is charged later.
 pub async fn balance(state: &SharedState, player_id: Uuid) -> Result<i32, AppError> {
     Ok(load(state, player_id).await?.money)
@@ -242,6 +247,17 @@ pub async fn apply(
     }
     .clamp();
     save(state, player_id, &life).await?;
+    if d.money != 0 {
+        // Lifetime cash flow for detailed stats (spec 15A).
+        sqlx::query(
+            "update player_life set cash_earned = cash_earned + $2, cash_spent = cash_spent + $3 where player_id = $1",
+        )
+        .bind(player_id)
+        .bind(i64::from(d.money.max(0)))
+        .bind(i64::from((-d.money).max(0)))
+        .execute(&state.db)
+        .await?;
+    }
     let after_level = level_for_xp(life.xp).0;
     if after_level > before_level {
         publish_event(
@@ -288,11 +304,29 @@ pub struct ActionDef {
     pub message: &'static str,
 }
 
+/// Stands for every club in the venue catalog (`sidepiece_common::venues`).
+pub const NIGHTLIFE: &str = "nightlife";
+
+impl ActionDef {
+    /// Venue kinds this action is available in, with [`NIGHTLIFE`] expanded to every club.
+    pub fn venue_kinds(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for v in self.venues {
+            if *v == NIGHTLIFE {
+                out.extend(sidepiece_common::venues::nightlife_kinds());
+            } else {
+                out.push(*v);
+            }
+        }
+        out
+    }
+}
+
 pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: "buy_drink",
         label: "Buy a drink (₦3,500)",
-        venues: &["neon_lounge", "rooftop_party"],
+        venues: &[NIGHTLIFE],
         delta: LifeDelta {
             money: -3_500,
             xp: 2,
@@ -307,7 +341,7 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: "eat",
         label: "Grab food (₦5,000)",
-        venues: &["neon_lounge", "rooftop_party", "city"],
+        venues: &[NIGHTLIFE, "city"],
         delta: LifeDelta {
             money: -5_000,
             xp: 1,
@@ -322,7 +356,7 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: "dance",
         label: "Dance",
-        venues: &["neon_lounge", "rooftop_party"],
+        venues: &[NIGHTLIFE],
         delta: LifeDelta {
             money: 0,
             xp: 4,
@@ -378,7 +412,7 @@ pub async fn do_action(
         .find(|a| a.id == req.action)
         .ok_or_else(|| AppError::bad_request("unknown action"))?;
     if let Some(venue) = req.venue.as_deref()
-        && !action.venues.contains(&venue)
+        && !action.venue_kinds().contains(&venue)
     {
         return Err(AppError::bad_request("you can't do that here"));
     }
@@ -408,7 +442,7 @@ pub async fn do_action(
 pub struct ActionInfo {
     pub id: &'static str,
     pub label: &'static str,
-    pub venues: &'static [&'static str],
+    pub venues: Vec<&'static str>,
 }
 
 pub async fn list_actions() -> Json<ApiOk<Vec<ActionInfo>>> {
@@ -418,7 +452,7 @@ pub async fn list_actions() -> Json<ApiOk<Vec<ActionInfo>>> {
             .map(|a| ActionInfo {
                 id: a.id,
                 label: a.label,
-                venues: a.venues,
+                venues: a.venue_kinds(),
             })
             .collect(),
     ))

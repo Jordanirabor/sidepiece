@@ -2,9 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArcRotateCamera, Color3, DirectionalLight, HemisphericLight, PointLight, Scene, Vector3 } from '@babylonjs/core';
 import { applyCinematicLook, createEngine, disposeEngine } from './render';
 import { makeAvatar } from './avatar3d';
-import { ACCESSORIES, BOTTOMS, HAIR_COLORS, Item, Look, matchCode, PARTNER_TRAITS, randomLook, STYLES, TOPS, findItem } from './look';
+import { ACCESSORIES, BOTTOMS, CLOTH_COLORS, DEFAULT_SHOES, findItem, forFrame, Frame, frameOf, HAIR_COLORS, hairFor, Item, Look, matchCode, PARTNER_TRAITS, randomLook, resolveHair, resolveItem, SHOES, STYLES, TOPS } from './look';
 import { ArrowLeft, ArrowRight, AtSign, Check, HeartHandshake, PencilLine, Shirt, Sparkles, UserRound, type LucideIcon } from 'lucide-react';
-import { Field } from './ui';
+import { Field, Toggle } from './ui';
 import { INTENTS, INTERESTS, INVITATION_TYPES, labelOf, MAX_BIO_CHARS, MAX_INTERESTS, Preferences, RELATIONSHIP_STYLES, SHOW_ME } from './prefs';
 
 export type Identity = { alias: string; gender: string; likes: string[]; look: Look; match_code: string; bio: string; intent: string; preferences: Preferences };
@@ -18,13 +18,6 @@ const CHECKLIST: { label: string; step: number; Icon: LucideIcon }[] = [
   { label: 'Outfit', step: 3, Icon: Shirt },
   { label: 'Vibe', step: 4, Icon: HeartHandshake },
 ];
-
-function Toggle({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return <label className="switch-row">
-    <span><b>{label}</b>{hint && <em>{hint}</em>}</span>
-    <input type="checkbox" role="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-  </label>;
-}
 
 const GENDERS = [
   { id: 'male', label: 'Male', icon: '♂' },
@@ -134,9 +127,9 @@ function FacePad({ label, axes, x, y, onChange }: { label: [string, string, stri
   </div>;
 }
 
-function Carousel({ title, items, value, onChange }: { title: string; items: Item[]; value: string; onChange: (id: string) => void }) {
-  const [offset, setOffset] = useState(0);
+function Carousel({ title, items, value, onChange, tint }: { title: string; items: Item[]; value: string; onChange: (id: string) => void; tint?: string }) {
   const visible = 4;
+  const [offset, setOffset] = useState(() => Math.max(0, Math.min(items.length - visible, items.findIndex((i) => i.id === value))));
   const shown = items.slice(offset, offset + visible);
   return <div className="carousel">
     <h4>{title}</h4>
@@ -144,11 +137,32 @@ function Carousel({ title, items, value, onChange }: { title: string; items: Ite
       <button className="arrow" disabled={offset === 0} onClick={() => setOffset((o) => Math.max(0, o - 1))}>‹</button>
       {shown.map((item) => <button key={item.id} title={item.label} className={`swatch ${value === item.id ? 'selected' : ''}`} onClick={() => onChange(item.id)}>
         <span className="swatch-icon" style={{ color: item.color }}>{item.icon}</span>
-        <i style={{ background: item.color }} />
+        <i style={{ background: value === item.id && tint ? tint : item.color }} />
       </button>)}
       <button className="arrow" disabled={offset + visible >= items.length} onClick={() => setOffset((o) => Math.min(items.length - visible, o + 1))}>›</button>
     </div>
+    <p className="carousel-label">{items.find((i) => i.id === value)?.label ?? ''}</p>
   </div>;
+}
+
+/** Colour override for a top or bottom; the first swatch keeps the item's own colour. */
+function ColorRow({ label, value, base, onChange }: { label: string; value: string; base: string; onChange: (hex: string) => void }) {
+  return <div className="cloth-colors" role="radiogroup" aria-label={label}>
+    <button role="radio" aria-checked={!value} aria-label="Original colour" className={`original ${!value ? 'selected' : ''}`} style={{ background: base }} onClick={() => onChange('')} />
+    {CLOTH_COLORS.map((c) => <button key={c} role="radio" aria-checked={value === c} aria-label={c} className={value === c ? 'selected' : ''} style={{ background: c }} onClick={() => onChange(c)} />)}
+  </div>;
+}
+
+/** Keep every part valid for the frame (e.g. after switching gender), so the controls always show what's drawn. */
+function fitToFrame(l: Look): Look {
+  const f = frameOf(l);
+  return {
+    ...l,
+    top: resolveItem(TOPS, l.top, f).id,
+    bottom: resolveItem(BOTTOMS, l.bottom, f).id,
+    shoes: resolveItem(SHOES, l.shoes || DEFAULT_SHOES[f], f).id,
+    hair_style: resolveHair(l, f).id,
+  };
 }
 
 type Props = {
@@ -178,18 +192,19 @@ export function Creator({ initial, saving, onComplete, initialStep = 1, mode = '
   const [alias, setAlias] = useState(initial.alias);
   const [gender, setGender] = useState(initial.gender);
   const [likes, setLikes] = useState<string[]>(initial.likes);
-  const [look, setLook] = useState<Look>(initial.look);
+  const [look, setLook] = useState<Look>(() => fitToFrame(initial.look));
+  const frame: Frame = frameOf(look);
   const set = <K extends keyof Look>(key: K, value: Look[K]) => setLook((l) => ({ ...l, [key]: value }));
   const code = matchCode(`${alias}:${gender}:${JSON.stringify(look)}`);
 
   const chooseGender = (g: string) => {
     setGender(g);
-    setLook((l) => ({ ...l, gender: g, hair_length: g === 'female' && l.hair_length < 0.4 ? 0.75 : l.hair_length }));
+    setLook((l) => fitToFrame({ ...l, gender: g, hair_length: g === 'female' && l.hair_length < 0.4 ? 0.75 : l.hair_length }));
   };
   const toggleLike = (id: string) => setLikes((ls) => (ls.includes(id) ? ls.filter((l) => l !== id) : ls.length >= 3 ? ls : [...ls, id]));
   const chooseStyle = (id: string) => {
     const s = STYLES.find((x) => x.id === id)!;
-    setLook((l) => ({ ...l, style: id, top: s.outfit.top, bottom: gender === 'male' && s.id === 'glam' ? 'trousers_black' : s.outfit.bottom, accessory: s.outfit.accessory }));
+    setLook((l) => fitToFrame({ ...l, style: id, top: s.outfit.top, bottom: s.outfit.bottom, shoes: s.outfit.shoes, accessory: s.outfit.accessory, top_color: '', bottom_color: '' }));
   };
 
   const step1Ok = alias.trim().length >= 2 && likes.length > 0;
@@ -229,15 +244,19 @@ export function Creator({ initial, saving, onComplete, initialStep = 1, mode = '
           <h2>Build your character</h2>
           <p className="creator-sub">Craft your look.</p>
           <div className="preview-box face"><Preview look={look} framing="face" /></div>
-          <div className="build-grid">
-            <div>
-              <label>Hair</label>
-              <input type="range" min={0} max={1} step={0.01} value={look.hair_length} onChange={(e) => set('hair_length', +e.target.value)} />
-              <div className="range-legend"><span>short</span><span>long</span></div>
+          {gender === 'non_binary' && <>
+            <label>Build</label>
+            <div className="trait-row">
+              {([['male', 'Masculine', 0.2], ['female', 'Feminine', 0.8]] as const).map(([f, label, len]) => <button key={f} className={`trait ${frame === f ? 'selected' : ''}`} onClick={() => setLook((l) => fitToFrame({ ...l, hair_length: len }))}>{label}</button>)}
             </div>
-            <div className="hair-colors">
-              {HAIR_COLORS.map((c) => <button key={c} aria-label={c} className={look.hair_color === c ? 'selected' : ''} style={{ background: c }} onClick={() => set('hair_color', c)} />)}
-            </div>
+          </>}
+          <label>Hair style</label>
+          <div className="trait-row hair-styles">
+            {hairFor(frame).map((h) => <button key={h.id} className={`trait ${look.hair_style === h.id ? 'selected' : ''}`} onClick={() => set('hair_style', h.id)}>{h.label}</button>)}
+          </div>
+          <label>Hair colour</label>
+          <div className="cloth-colors" role="radiogroup" aria-label="Hair colour">
+            {HAIR_COLORS.map((c) => <button key={c} role="radio" aria-checked={look.hair_color === c} aria-label={c} className={look.hair_color === c ? 'selected' : ''} style={{ background: c }} onClick={() => set('hair_color', c)} />)}
           </div>
           <label>Skin tone</label>
           <input className="skin-slider" type="range" min={0} max={1} step={0.01} value={look.skin_tone} onChange={(e) => set('skin_tone', +e.target.value)} />
@@ -248,15 +267,18 @@ export function Creator({ initial, saving, onComplete, initialStep = 1, mode = '
           </div>
           <label>Body type</label>
           <input type="range" min={0} max={1} step={0.01} value={look.body_type} onChange={(e) => set('body_type', +e.target.value)} />
-          <button className="randomize" onClick={() => setLook(randomLook(gender))}>Randomize unique look 🎲</button>
+          <button className="randomize" onClick={() => setLook(fitToFrame(randomLook(gender)))}>Randomize unique look 🎲</button>
         </>}
 
         {step === 3 && <>
           <h2>Select your outfit</h2>
           <p className="creator-sub">Dress the part.</p>
           <div className="preview-box full"><Preview look={look} framing="full" /></div>
-          <Carousel title="Top" items={TOPS} value={look.top} onChange={(id) => set('top', id)} />
-          <Carousel title="Bottom" items={BOTTOMS} value={look.bottom} onChange={(id) => set('bottom', id)} />
+          <Carousel key={`top-${frame}`} title="Top" items={forFrame(TOPS, frame)} value={look.top} tint={look.top_color} onChange={(id) => set('top', id)} />
+          <ColorRow label="Top colour" value={look.top_color ?? ''} base={findItem(TOPS, look.top).color} onChange={(c) => set('top_color', c)} />
+          <Carousel key={`bottom-${frame}`} title="Bottom" items={forFrame(BOTTOMS, frame)} value={look.bottom} tint={look.bottom_color} onChange={(id) => set('bottom', id)} />
+          <ColorRow label="Bottom colour" value={look.bottom_color ?? ''} base={findItem(BOTTOMS, look.bottom).color} onChange={(c) => set('bottom_color', c)} />
+          <Carousel key={`shoes-${frame}`} title="Shoes" items={forFrame(SHOES, frame)} value={look.shoes ?? ''} onChange={(id) => set('shoes', id)} />
           <Carousel title="Accessories" items={ACCESSORIES} value={look.accessory} onChange={(id) => set('accessory', id)} />
           <div className="carousel">
             <h4>Style</h4>

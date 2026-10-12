@@ -335,6 +335,7 @@ pub async fn thread(
         messages,
         open_to: open_to(&state, other).await?,
         invitations: super::invites::between(&state, q.player_id, other).await?,
+        stats: super::progress::public_stats(&state, other).await?,
     })))
 }
 

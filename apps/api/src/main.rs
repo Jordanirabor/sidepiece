@@ -1,11 +1,15 @@
 mod auth;
 mod chat;
 mod dates;
+mod encounters;
+mod feed;
 mod invites;
 mod life;
 mod matching;
 mod messages;
 mod npcs;
+mod progress;
+mod settings;
 
 use axum::{
     Json, Router,
@@ -145,6 +149,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/dates/{id}", get(dates::get_date))
         .route("/v1/dates/{id}/choose", post(dates::choose))
         .route("/v1/dates/{id}/leave", post(dates::leave))
+        .route("/v1/feed", get(feed::get_feed))
+        .route("/v1/feed/seen", post(feed::mark_seen))
+        .route("/v1/encounters/{id}", get(encounters::get_encounter))
+        .route("/v1/encounters/{id}/confirm", post(encounters::confirm))
+        .route("/v1/encounters/{id}/complete", post(encounters::complete))
+        .route("/v1/encounters/{id}/leave", post(encounters::leave))
+        .route("/v1/outcomes/{id}/feedback", post(progress::give_feedback))
+        .route("/v1/player/{player_id}/stats", get(progress::get_stats))
+        .route(
+            "/v1/player/{player_id}/stats/visibility",
+            post(progress::set_visibility),
+        )
         .route("/v1/social/private-room", post(request_private_room))
         .route(
             "/v1/social/private-room/incoming",
@@ -160,6 +176,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/moderation/report", post(report_target))
         .route("/v1/moderation/block", post(block_target))
+        .route("/v1/moderation/unblock", post(settings::unblock))
+        .route(
+            "/v1/player/{player_id}/settings",
+            get(settings::get_settings),
+        )
+        .route(
+            "/v1/player/{player_id}/settings/notifications",
+            post(settings::set_notifications),
+        )
+        .route("/v1/account/password", post(auth::change_password))
+        .route("/v1/account/delete", post(auth::delete_account))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -186,6 +213,8 @@ struct BootstrapResponse {
     intents: Vec<PlayerIntent>,
     starter_outfits: Vec<&'static str>,
     starter_rooms: Vec<&'static str>,
+    /// The Lagos clubs you can walk into from the city (ADR 0019).
+    venues: &'static [sidepiece_common::venues::Venue],
 }
 
 async fn bootstrap() -> Json<ApiOk<BootstrapResponse>> {
@@ -199,6 +228,7 @@ async fn bootstrap() -> Json<ApiOk<BootstrapResponse>> {
         ],
         starter_outfits: vec!["streetwear_black", "red_nightlife", "casual_denim"],
         starter_rooms: vec!["neon_lounge", "rooftop_party"],
+        venues: sidepiece_common::venues::VENUES,
     }))
 }
 
@@ -255,6 +285,14 @@ async fn verify_auth(
         &Validation::default(),
     )?
     .claims;
+    // A deleted account's token is still signed; session restore must not bring it back.
+    let exists: bool = sqlx::query_scalar("select exists(select 1 from players where id = $1)")
+        .bind(claims.sub)
+        .fetch_one(&state.db)
+        .await?;
+    if !exists {
+        return Err(AppError::unauthorized("account no longer exists"));
+    }
 
     Ok(Json(ApiOk::new(AuthVerifyResponse {
         player_id: claims.sub,
@@ -425,19 +463,19 @@ async fn room_recommendation(
     let (kind, reason) = match avatar.as_ref().map(|a| &a.intent) {
         Some(PlayerIntent::Flirt) | Some(PlayerIntent::CasualDating) => (
             "neon_lounge",
-            "Ikoyi Lounge has the highest chemistry potential for flirting, first conversations, and casual discovery.",
+            "Club 57 on Awolowo Road has the highest chemistry potential for flirting, first conversations, and casual discovery.",
         ),
         Some(PlayerIntent::Relationship) => (
             "rooftop_party",
-            "Victoria Island Rooftop is better for slower conversations, profile browsing, and relationship-minded encounters.",
+            "Sky Garden's rooftop is better for slower conversations, profile browsing, and relationship-minded encounters.",
         ),
         Some(PlayerIntent::Explore) => (
-            "rooftop_party",
-            "Victoria Island Rooftop gives you a broader mix of people, scenes, and social options while you explore.",
+            "quilox",
+            "Quilox on Ozumba Mbadiwe gives you the biggest crowd, the loudest night and the widest mix of people while you explore.",
         ),
         _ => (
             "neon_lounge",
-            "Ikoyi Lounge is the best starter venue for meeting people and learning how Lagos nights flow.",
+            "Club 57 in Ikoyi is the best starter venue for meeting people and learning how Lagos nights flow.",
         ),
     };
 
@@ -445,10 +483,15 @@ async fn room_recommendation(
         recommended_room_kind: kind.into(),
         display_name: room_display_name(kind).into(),
         reason: reason.into(),
-        alternatives: vec![
-            room_summary(&state, "neon_lounge", "neon_lounge-001".into()).await,
-            room_summary(&state, "rooftop_party", "rooftop_party-001".into()).await,
-        ],
+        alternatives: {
+            let mut alts = Vec::new();
+            for alt in ["neon_lounge", "rooftop_party", "quilox"] {
+                if alt != kind {
+                    alts.push(room_summary(&state, alt, format!("{alt}-001")).await);
+                }
+            }
+            alts
+        },
     })))
 }
 
@@ -456,7 +499,7 @@ async fn list_rooms(
     State(state): State<SharedState>,
 ) -> Result<Json<ApiOk<RoomDirectoryResponse>>, AppError> {
     let mut rooms = Vec::new();
-    for kind in ["neon_lounge", "rooftop_party"] {
+    for kind in sidepiece_common::venues::nightlife_kinds() {
         for index in 1..=3 {
             let id = format!("{kind}-{index:03}");
             rooms.push(room_summary(&state, kind, id).await);
@@ -547,6 +590,9 @@ async fn join_room(
     let room_kind = req
         .preferred_room
         .unwrap_or_else(|| "neon_lounge".to_string());
+    if room_kind != "city" && sidepiece_common::venues::venue(&room_kind).is_none() {
+        return Err(AppError::bad_request("unknown venue"));
+    }
     let room_id = choose_room_instance(&state, &room_kind).await;
     sqlx::query("insert into room_assignments (player_id, room_id) values ($1, $2) on conflict (player_id) do update set room_id = excluded.room_id, updated_at = now()")
         .bind(req.player_id)
@@ -614,11 +660,10 @@ mod tests {
     #[test]
     fn venues_use_lagos_names() {
         assert_eq!(room_display_name("city"), "Lekki Phase 1");
-        assert_eq!(room_display_name("neon_lounge"), "Ikoyi Lounge");
-        assert_eq!(
-            room_display_name("rooftop_party"),
-            "Victoria Island Rooftop"
-        );
+        assert_eq!(room_display_name("neon_lounge"), "Club 57");
+        assert_eq!(room_display_name("rooftop_party"), "Sky Garden");
+        assert_eq!(room_display_name("quilox"), "Quilox");
+        assert_eq!(room_capacity("quilox"), 60);
     }
 
     #[test]
@@ -684,19 +729,17 @@ async fn room_player_count(state: &SharedState, room_id: &str) -> u32 {
 
 fn room_capacity(kind: &str) -> u32 {
     match kind {
-        "rooftop_party" => 35,
         "city" => 80,
         "private_room" => 2,
-        _ => 50,
+        _ => sidepiece_common::venues::venue(kind).map_or(50, |v| v.capacity),
     }
 }
 
 fn room_display_name(kind: &str) -> &'static str {
     match kind {
-        "rooftop_party" => "Victoria Island Rooftop",
         "city" => "Lekki Phase 1",
         "private_room" => "Private Room",
-        _ => "Ikoyi Lounge",
+        _ => sidepiece_common::venues::venue(kind).map_or("Lagos", |v| v.name),
     }
 }
 
@@ -778,13 +821,10 @@ async fn discovery(
             {
                 continue;
             }
-            profiles.push(player_profile(
-                target,
-                display_name,
-                location.clone(),
-                me.as_ref(),
-                &other,
-            ));
+            let mut card =
+                player_profile(target, display_name, location.clone(), me.as_ref(), &other);
+            progress::attach_public_stats(&state, &mut card, other_id).await?;
+            profiles.push(card);
         }
     }
 
@@ -811,6 +851,7 @@ async fn discovery(
             open_to: INVITATION_TYPES.iter().map(|t| t.to_string()).collect(),
             look: Some(npc.look()),
             online: true,
+            stats: None,
         });
     }
 
@@ -841,7 +882,8 @@ fn player_profile(
             Some(me) => sidepiece_common::player_compatibility(me, other),
             None => 50,
         },
-        social_rating: 7.5,
+        // Filled from their public reputation by `progress::attach_public_stats`; 0 = private.
+        social_rating: 0.0,
         is_available: true,
         npc: None,
         bio: other.bio.clone(),
@@ -859,6 +901,7 @@ fn player_profile(
             .collect(),
         look: Some(other.look.clone()),
         online: true,
+        stats: None,
     }
 }
 
@@ -917,6 +960,7 @@ async fn request_private_room(
             capacity: room_capacity("private_room"),
             websocket_url: state.room_ws_public_url.clone(),
         },
+        encounter_id: None,
     })))
 }
 
@@ -946,12 +990,13 @@ async fn load_private_room(state: &SharedState, room_id: &str) -> Result<Private
     })
 }
 
-fn private_room_summary(
+async fn private_room_summary(
     state: &SharedState,
     room_id: String,
     consent_state: &str,
-) -> PrivateRoomResult {
-    PrivateRoomResult {
+) -> Result<PrivateRoomResult, AppError> {
+    Ok(PrivateRoomResult {
+        encounter_id: encounters::id_for_room(state, &room_id).await?,
         consent_state: consent_state.into(),
         room: RoomSummary {
             id: room_id,
@@ -966,7 +1011,7 @@ fn private_room_summary(
             capacity: room_capacity("private_room"),
             websocket_url: state.room_ws_public_url.clone(),
         },
-    }
+    })
 }
 
 /// Consent rules:
@@ -997,12 +1042,31 @@ async fn update_private_room_consent(
         }
         _ => return Err(AppError::forbidden("not allowed to change this request")),
     };
+    if consent_state == "accepted" && npc_target {
+        // Simulated NPC consent follows the same bar as invitations: Friend tier for anything private.
+        let affinity = chat::load_stats(&state, req.player_id, &room.target_id)
+            .await?
+            .affinity;
+        let a = invites::activity("private_location")
+            .ok_or_else(|| AppError::bad_request("unknown activity"))?;
+        let name = room
+            .target_id
+            .strip_prefix("npc:")
+            .and_then(npcs::find)
+            .map(|n| n.name)
+            .unwrap_or("They");
+        invites::npc_answer(a, affinity, name).map_err(|e| AppError::forbidden(&e))?;
+    }
 
     sqlx::query("update private_rooms set consent_state = $1, updated_at = now() where id = $2")
         .bind(consent_state)
         .bind(&room_id)
         .execute(&state.db)
         .await?;
+
+    if consent_state == "accepted" {
+        encounters::open(&state, &room_id, room.created_by, &room.target_id).await?;
+    }
 
     publish_event(
         &state,
@@ -1014,11 +1078,9 @@ async fn update_private_room_consent(
     )
     .await;
 
-    Ok(Json(ApiOk::new(private_room_summary(
-        &state,
-        room_id,
-        consent_state,
-    ))))
+    Ok(Json(ApiOk::new(
+        private_room_summary(&state, room_id, consent_state).await?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -1039,11 +1101,9 @@ async fn private_room_status(
     if !allowed {
         return Err(AppError::forbidden("not a participant"));
     }
-    Ok(Json(ApiOk::new(private_room_summary(
-        &state,
-        room_id,
-        &room.consent_state,
-    ))))
+    Ok(Json(ApiOk::new(
+        private_room_summary(&state, room_id, &room.consent_state).await?,
+    )))
 }
 
 async fn incoming_private_room_requests(

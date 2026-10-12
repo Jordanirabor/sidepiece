@@ -9,7 +9,7 @@ export type Invitation = {
   id: string; activity: string; label: string; icon: string; cost: number;
   from_player_id: string; from_name: string; target_id: string; target_name: string; outgoing: boolean;
   status: InviteStatus; expires_at: string; created_at: string;
-  date_id?: string | null; date_status?: 'active' | 'completed' | 'left' | null; room_id?: string | null; note?: string | null;
+  date_id?: string | null; date_status?: 'active' | 'completed' | 'left' | null; room_id?: string | null; note?: string | null; encounter_id?: string | null;
 };
 
 /**

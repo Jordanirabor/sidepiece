@@ -15,6 +15,7 @@ import {
   Plane,
   Scene,
   ShadowGenerator,
+  SSAO2RenderingPipeline,
   StandardMaterial,
   Texture,
   Vector3,
@@ -67,6 +68,8 @@ export type LookOptions = {
   vignette?: number;
   /** Small canvases (portraits, cards) skip grain and MSAA. */
   compact?: boolean;
+  /** Screen-space ambient occlusion (high tier only): contact darkening where buildings meet the ground. */
+  ao?: boolean;
 };
 
 /** Filmic post-processing: ACES tone mapping, bloom on neon, anti-aliasing and a soft vignette. */
@@ -95,6 +98,15 @@ export function applyCinematicLook(scene: Scene, cameras: Camera[], opts: LookOp
   if (high) {
     pipeline.grain.intensity = 5;
     pipeline.grain.animated = true;
+  }
+  if (high && opts.ao && SSAO2RenderingPipeline.IsSupported && !new URLSearchParams(window.location.search).has("noao")) {
+    const ssao = new SSAO2RenderingPipeline('ssao', scene, { ssaoRatio: 0.5, blurRatio: 1 }, cameras);
+    ssao.radius = 1.6;
+    ssao.totalStrength = 1.1;
+    ssao.base = 0.15;
+    ssao.samples = 16;
+    ssao.maxZ = 220;
+    ssao.expensiveBlur = true;
   }
   return pipeline;
 }

@@ -6,8 +6,36 @@ description: Conventions and gotchas for Side Piece's Babylon.js 3D world, avata
 # Side Piece 3D scene conventions
 
 ## Art direction
-Semi-realistic 3D, Lagos nightlife, neon violet/pink/cyan with warm amber practicals (ADR 0012, `docs/references/README.md` → *Distilled art direction*).
-The current humanoid is a **placeholder built from primitives**. Every `AvatarLook` field must stay visibly mapped until Rocketbox glTF models replace it (ADR 0012 phase 2).
+Stylized low-poly diorama like MyAbujaLife (ADR 0017, `docs/references/README.md` → *Distilled art direction*), with
+neon violet/pink/cyan for nightlife accents.
+
+## City (`web/src/city.ts`)
+- One open map: 48 × 32 tiles of `TILE` = 11 m. `cellPos(c, r)` gives a tile centre (+X east, +Z north). The street
+  plan is `STREETS_EW` / `STREETS_NS`; roads auto-tile in `roadPiece`. Kenney orientations at rotation 0: straight
+  runs along X, bend joins N+E, T-junction is missing S, end-round is open to W, `road-bridge` runs along Z, and
+  buildings face −Z (`FACE`).
+- Realistic art (ADR 0018/0019) comes from `public/world/lagos.glb` (city) and `public/world/venues.glb` (rooms), built
+  by `scripts/blender/build_city.py` from Poly Haven textures (see its README). They're loaded after `kit.glb`, so their
+  `road-*` pieces replace Kenney's. Their materials stay PBR: `tuneLagosMaterial` tints `plaster.peach`-style names from
+  `TINTS`. `neon`, `neon2` and `dancefloor` take each club's colours. In venues, `usePhysicalLightFalloff = false` keeps
+  point lights range-based. Kenney still supplies cars, traffic lights and parasols.
+- Kit models come from `public/world/kit.glb` (`scripts/world/build.mjs`). They're baked to world space at load and
+  drawn as **thin instances** (`place(model, x, z, rot, scale)`). Don't add per-object meshes for repeated props.
+- Every Kenney kit's material is named `colormap`, so key materials by `uniqueId`. Keying by name gave every kit
+  the commercial palette (orange roads, red trunks).
+- Water and ground: the water planes sit just *above* the ground plane, or the ground hides them.
+- Only neon belongs in the city's glow layer (`glowing(mesh)`). Glowing whole buildings turned the night into a haze.
+- Collision: `addBox` footprints per tile; `venue.collide(from, to)` slides. Portals sit on the street in front of
+  venue doors. `?hour=H` pins the time of day.
+
+## Characters (`web/src/avatar3d.ts`, `look.ts`)
+- Quaternius modular rigs: `public/characters/{male,female}.glb` (`scripts/characters/build.mjs`). A look picks one
+  `<Set>_Head|Body|Legs|Feet` per frame from `TOPS`/`BOTTOMS`/`SHOES`/`HAIR_STYLES` (`parts[frame] = [set,
+  material]`). The other parts are disposed.
+- Parts share materials (a dress and its skirt are both `LimeGreen`), so **clone before recolouring**. glTF colours
+  are linear: use `toLinearSpace()`.
+- Head bone is `Head`. Extra hair volumes (afro, puffs, locs) are placed in world space at rest, then `setParent(head)`.
+- Every creator control must change something visible. Add an item only when a part exists for that frame.
 
 ## Rendering (`web/src/render.ts`)
 - Every 3D canvas uses `createEngine()` (capped pixel ratio) and `applyCinematicLook(scene, [camera], opts)`:
@@ -52,13 +80,16 @@ The current humanoid is a **placeholder built from primitives**. Every `AvatarLo
 - Kinds: `city`, `neon_lounge`, `rooftop_party`, `private_room`. Portals use the `matchmaking/join` room kind.
   Every venue except the private room has a portal back to `city`.
 - City doors: glowing door, neon sign label (`makeLabel`), floor marker disc, coloured point light.
-- A new venue also needs an API room kind (`room_capacity`, `room_display_name` in `apps/api/src/main.rs`), NPCs in `npcs.rs`, and life actions in `life.rs` `ACTIONS[].venues`.
+- A new club is one entry in `crates/common/src/venues.rs` (kind without `-`, name, area, street, style, capacity), its
+  mirror in `web/src/venues.ts` (colours, vibe) and a lot in `VENUE_LOTS` in `city.ts`. Life actions reach it via
+  `NIGHTLIFE`, and the API validates joins against the catalog. Interiors come from the style (`lounge-room`, `rooftop-room`,
+  `beach-room`). NPCs in `npcs.rs` are optional.
 
 ## Interaction
 - `SceneView` picks the nearest NPC (≤ 2.2) or portal (≤ 2.64) as the target. E or a click on the prompt activates it.
 - The prompt is hidden while the NPC chat is open (CSS `:has`).
 - Keyboard input is ignored while an input is focused. Keys clear on window blur.
-- `window.__sp` is a read-only test hook (`pos()`, `portals`, `venue`) used by `web/scripts/ui-check.mjs`. Keep it working.
+- `window.__sp` is a test hook (`pos()`, `portals`, `venue`, `teleport(x, z, rot)` for screenshots) used by `web/scripts/ui-check.mjs`. Keep it working.
 
 ## Performance
 - The scene rebuilds on venue, look or NPC-set change. Dispose engines in effect cleanup.
